@@ -1,0 +1,9 @@
+appId: com.jpl.jiomart
+---
+- launchApp:
+    clearState: true
+
+# 3. Tap Element
+- tapOn:
+    accessibilityId: Avatar
+

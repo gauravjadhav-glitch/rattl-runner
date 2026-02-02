@@ -1,0 +1,33 @@
+appId: com.hamleys_webapp
+---
+- launchApp:
+    clearState: true
+- waitForAnimationToEnd
+
+# --- POPUP HANDLER STRATEGY ---
+# Attempt to clear any blocking permissions/popups
+# All are optional, so the test continues if they don't appear
+
+# 10. Tap Element
+- tapOn:
+    point: 51%,56%
+
+- tapOn:
+    text: "While using the app"
+    optional: true
+
+- tapOn:
+    text: "Auhtorize" # Common typo or variation
+    optional: true
+
+# -----------------------------
+
+- tapOn: "Search"
+- inputText: "toys"
+- pressKey: Enter
+
+- assertVisible: "By Search - Toys"
+# 10. Tap Element
+- tapOn:
+    point: 51%,56%
+

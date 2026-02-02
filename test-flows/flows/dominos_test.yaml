@@ -1,0 +1,8 @@
+appId: com.Dominos
+---
+- launchApp:
+    clearState: true
+    
+- assertVisible: 
+    text: ".*"
+    timeout: 10000

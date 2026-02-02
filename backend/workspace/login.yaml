@@ -1,0 +1,4 @@
+appId: com.hamleys_webapp
+---
+- launchApp:
+    clearState: true

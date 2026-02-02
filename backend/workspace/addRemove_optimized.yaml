@@ -1,0 +1,30 @@
+appId: com.hamleys_webapp
+---
+# Optimized test with faster clearState and optional permission handling
+- launchApp:
+    clearState: true
+
+# Wait for app to fully load
+- waitForAnimationToEnd
+
+# Handle permission dialog (optional - won't fail if not present)
+- tapOn:
+    text: "Allow"
+    optional: true
+
+# Alternative: try uppercase ALLOW
+- tapOn:
+    text: "ALLOW"
+    optional: true
+
+# Alternative: "While using the app" button
+- tapOn:
+    text: "While using the app"
+    optional: true
+
+# Main test flow
+- tapOn: "Search"
+- inputText: "toys"
+- pressKey: Enter
+
+- assertVisible: "By Search - Toys"

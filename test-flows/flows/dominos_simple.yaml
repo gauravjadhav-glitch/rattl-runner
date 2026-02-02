@@ -1,0 +1,12 @@
+appId: com.Dominos
+---
+# Try launching without clearState first
+- launchApp
+
+# Wait a bit for app to load
+- waitForAnimationToEnd
+
+# Try to detect any visible element
+- assertVisible: 
+    text: ".*"
+    timeout: 15000

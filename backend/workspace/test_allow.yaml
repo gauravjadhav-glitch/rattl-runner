@@ -1,0 +1,14 @@
+appId: com.hamleys_webapp
+---
+- launchApp:
+    clearState: true
+- waitForAnimationToEnd
+- tapOn:
+    point: 51%,56%
+- tapOn: Search
+- inputText: "toys"
+- pressKey: Enter
+
+- assertVisible: "By Search - Toys"
+
+- tapOn Search

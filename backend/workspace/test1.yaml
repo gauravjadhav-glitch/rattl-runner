@@ -1,0 +1,42 @@
+appId: com.hamleys_webapp
+---
+- launchApp:
+    clearState: true
+- waitForAnimationToEnd
+
+- tapOn: Search
+- inputText: "toys"
+- pressKey: Enter
+
+- assertVisible: "By Search - Toys"
+
+- tapOn: Add 
+- extendedWaitUntil:
+    notVisible:
+      id: Product added successfully
+    timeout: 10000
+- assertVisible: view bag
+
+- tapOn:
+    point: 90%,9%
+- tapOn:
+    point: 92%,43%
+
+- tapOn: REMOVE
+- extendedWaitUntil:
+    notVisible:
+      id: item removed from cart
+    timeout: 10000
+- assertVisible: Your shopping bag is empty
+- assertVisible: RETURN TO HOMEPAGE
+- tapOn: RETURN TO HOMEPAGE
+- tapOn:
+    point: "46%,43%"
+- tapOn:
+    point: "32%,22%"
+- tapOn:
+    point: "7%,92%"
+- tapOn:
+    point: "7%,92%"
+- tapOn:
+    point: "4%,17%"

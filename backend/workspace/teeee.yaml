@@ -1,0 +1,4 @@
+appId: com.jio.sephora
+---
+- launchApp:
+    clearState: true

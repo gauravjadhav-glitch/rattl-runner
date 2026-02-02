@@ -1,0 +1,1477 @@
+import React, { useState, useEffect, useRef } from 'react';
+import './index.css';
+
+// --- Icons ---
+const FileIcon = () => (
+    <svg width="14" height="16" viewBox="0 0 14 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 1C0 0.447715 0.447715 0 1 0H9L14 5V15C14 15.5523 13.5523 16 13 16H1C0.447715 16 0 15.5523 0 15V1Z" fill="#A1A1A6" />
+        <path d="M9 0L14 5H9V0Z" fill="#D1D1D6" />
+    </svg>
+);
+
+const FolderIcon = () => (
+    <svg width="16" height="13" viewBox="0 0 16 13" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0 2C0 1.44772 0.447715 1 1 1H6L8 3H15C15.5523 3 16 3.44772 16 4V12C16 12.5523 15.5523 13 15 13H1C0.447715 13 0 12.5523 0 12V2Z" fill="#EBC347" />
+    </svg>
+);
+
+const NewTestIcon = () => (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+        <polyline points="14 2 14 8 20 8"></polyline>
+        <line x1="12" y1="18" x2="12" y2="12"></line>
+        <line x1="9" y1="15" x2="15" y2="15"></line>
+    </svg>
+);
+
+const NewFolderIcon = () => (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+        <line x1="12" y1="17" x2="12" y2="11"></line>
+        <line x1="9" y1="14" x2="15" y2="14"></line>
+    </svg>
+);
+
+const EditIcon = () => (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+    </svg>
+);
+
+const DeleteIcon = () => (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="3 6 5 6 21 6" />
+        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+        <line x1="10" y1="11" x2="10" y2="17" />
+        <line x1="14" y1="11" x2="14" y2="17" />
+    </svg>
+);
+
+function App() {
+    // --- State ---
+    const [files, setFiles] = useState([]);
+    const [currentFile, setCurrentFile] = useState(null);
+    const [editorContent, setEditorContent] = useState('');
+    const [logs, setLogs] = useState([{ type: 'info', text: 'Ratl Studio Terminal Ready' }]);
+    const [deviceConnected, setDeviceConnected] = useState(false);
+    const [isRunning, setIsRunning] = useState(false);
+    const [refreshKey, setRefreshKey] = useState(0);
+    const [packages, setPackages] = useState([]);
+    const [lineStatuses, setLineStatuses] = useState({}); // line# -> 'pass' | 'fail' | 'running'
+    const [hierarchy, setHierarchy] = useState(null);
+    const [elements, setElements] = useState([]);
+    const [selectedElement, setSelectedElement] = useState(null);
+    const [deviceInfo, setDeviceInfo] = useState({ width: 1080, height: 2280 });
+    const [showInspector, setShowInspector] = useState(true);
+    const [popupPosition, setPopupPosition] = useState(null); // { x, y } for floating popup
+    const [selectedLocatorIndex, setSelectedLocatorIndex] = useState(0); // Which locator (ID, Text, etc) is active
+    const [isFetchingHierarchy, setIsFetchingHierarchy] = useState(false);
+    const [hierarchyRefreshKey, setHierarchyRefreshKey] = useState(0);
+    const [interactMode, setInteractMode] = useState(false); // New: Auto-Insert & Run mode
+
+    // Modal State
+    const [showModal, setShowModal] = useState(false);
+    const [modalData, setModalData] = useState({
+        name: '',
+        appId: 'com.hamleys_webapp',
+        type: 'Mobile Test',
+        tags: ''
+    });
+
+    const terminalEndRef = useRef(null);
+    const lineNumbersRef = useRef(null);
+
+    // For Line Numbers
+    const countLines = (text) => text.split('\n').length;
+    const [lineCount, setLineCount] = useState(1);
+
+    // --- Effects ---
+    useEffect(() => {
+        fetchFiles();
+        checkDevice();
+        fetchPackages();
+        fetchDeviceInfo();
+
+        // Polling for device status only (slow)
+        const statusInterval = setInterval(() => {
+            checkDevice();
+        }, 3000);
+
+        return () => clearInterval(statusInterval);
+    }, []);
+
+    // Sequential polling handler: Only fetch next frame after current one is loaded
+    const onScreenLoad = () => {
+        if (deviceConnected) {
+            // Sequential polling: trigger one update after the other
+            // but with a small throttle cap if needed
+            setRefreshKey(prev => prev + 1);
+        }
+    };
+
+    // Only fetch hierarchy if inspector is ON and device is connected
+    useEffect(() => {
+        if (deviceConnected && showInspector && !isFetchingHierarchy) {
+            fetchHierarchy();
+        }
+    }, [hierarchyRefreshKey, deviceConnected, showInspector]);
+
+    useEffect(() => {
+        setSelectedLocatorIndex(0);
+    }, [selectedElement]);
+
+    // Update hierarchy refresh key at a slower pace
+    useEffect(() => {
+        if (showInspector && deviceConnected) {
+            const interval = setInterval(() => {
+                setHierarchyRefreshKey(prev => prev + 1);
+            }, 2000); // Fetch hierarchy every 2 seconds
+            return () => clearInterval(interval);
+        }
+    }, [showInspector, deviceConnected]);
+
+    useEffect(() => {
+        setLineCount(countLines(editorContent));
+    }, [editorContent]);
+
+    useEffect(() => {
+        const handleKeyDown = (e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+                e.preventDefault();
+                setShowModal(true);
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, []);
+
+    useEffect(() => {
+        if (terminalEndRef.current) {
+            const terminalContainer = terminalEndRef.current.parentElement;
+            const isNearBottom = terminalContainer.scrollHeight - terminalContainer.scrollTop - terminalContainer.clientHeight < 100;
+            if (isNearBottom) {
+                terminalContainer.scrollTop = terminalContainer.scrollHeight;
+            }
+        }
+    }, [logs]);
+
+    // --- API Calls ---
+    const fetchFiles = async () => {
+        try {
+            const res = await fetch('http://localhost:8000/files');
+            const data = await res.json();
+            setFiles(data.files || []);
+        } catch (e) {
+            console.error(e);
+        }
+    };
+
+    const fetchDeviceInfo = async () => {
+        try {
+            const res = await fetch('http://localhost:8000/device_info');
+            const data = await res.json();
+            if (data.size) {
+                const match = data.size.match(/(\d+)x(\d+)/);
+                if (match) {
+                    setDeviceInfo({ width: parseInt(match[1]), height: parseInt(match[2]) });
+                }
+            }
+        } catch (e) {
+            console.error('Fetch device info error:', e);
+        }
+    };
+
+    const fetchHierarchy = async () => {
+        if (!showInspector || isFetchingHierarchy) return;
+        setIsFetchingHierarchy(true);
+        try {
+            const res = await fetch('http://localhost:8000/hierarchy');
+            const data = await res.json();
+            if (data.output) {
+                const parsed = JSON.parse(data.output);
+                setHierarchy(parsed);
+                const flattened = [];
+                flattenHierarchy(parsed, flattened);
+                setElements(flattened);
+            }
+        } catch (e) {
+            console.error('Fetch hierarchy error:', e);
+        } finally {
+            setIsFetchingHierarchy(false);
+        }
+    };
+
+    const flattenHierarchy = (node, acc) => {
+        if (!node) return;
+        if (node.bounds) {
+            acc.push(node);
+        }
+        if (node.children) {
+            node.children.forEach(child => flattenHierarchy(child, acc));
+        }
+    };
+
+    const checkDevice = async () => {
+        try {
+            const res = await fetch('http://localhost:8000/devices');
+            const data = await res.json();
+
+            // Maestro-style check: Parse lines and look for 'device' status
+            const connected = !!data.output && data.output.split('\n').some(line => {
+                const parts = line.trim().split(/\s+/);
+                return parts.length >= 2 && parts[1] === 'device';
+            });
+
+            setDeviceConnected(prevConnected => {
+                if (connected && !prevConnected) {
+                    // Refresh list of packages and device resolution only when a device first connects
+                    fetchPackages();
+                    fetchDeviceInfo();
+                }
+                return connected;
+            });
+        } catch (e) {
+            setDeviceConnected(false);
+        }
+    };
+
+    const fetchPackages = async () => {
+        try {
+            const res = await fetch('http://localhost:8000/packages');
+            if (!res.ok) throw new Error('Failed to fetch packages');
+            const data = await res.json();
+            const pkgs = data.packages || [];
+            setPackages(pkgs);
+
+            // If appId is still the default and we have packages, update it
+            setModalData(prev => {
+                if (pkgs.length > 0 && (prev.appId === 'com.hamleys_webapp' || !prev.appId)) {
+                    return { ...prev, appId: pkgs[0] };
+                }
+                return prev;
+            });
+        } catch (e) {
+            console.error('Fetch packages error:', e);
+        }
+    };
+
+    const loadFile = async (file) => {
+        try {
+            const res = await fetch(`http://localhost:8000/file?path=${encodeURIComponent(file.path)}`);
+            const data = await res.json();
+            setCurrentFile(file);
+            setEditorContent(data.content);
+            setLineStatuses({});
+            addLog('info', `Loaded ${file.name}`);
+        } catch (e) {
+            alert('Error loading file');
+        }
+    };
+
+    const saveFile = async () => {
+        if (!currentFile) return;
+        try {
+            await fetch('http://localhost:8000/file', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: currentFile.path, content: editorContent })
+            });
+            addLog('success', `Saved ${currentFile.name}`);
+        } catch (e) {
+            addLog('error', `Failed to save ${currentFile.name}`);
+        }
+    };
+
+    const addLog = (type, text) => {
+        const time = new Date().toLocaleTimeString([], { hour12: false });
+        setLogs(prev => [...prev, { type, text, time }]);
+    };
+
+    const clearLogs = () => {
+        setLogs([{ type: 'info', text: 'Terminal Cleared', time: new Date().toLocaleTimeString([], { hour12: false }) }]);
+    };
+
+    // Helper function to get available locators for an element
+    const getAvailableLocators = (element) => {
+        if (!element || element.isPoint) return [];
+        const locators = [];
+
+        // 1. Text Content (Highest Priority)
+        const textValue = (element.text || element.attributes?.text || '').trim();
+        if (textValue) {
+            locators.push({
+                type: 'Text',
+                label: 'Visible Text',
+                value: textValue,
+                reliability: 'high',
+                selector: { text: textValue },
+                syntax: `"${textValue}"`
+            });
+        }
+
+        // 2. Resource ID
+        const idValue = element.resourceId || element['resource-id'] || element.attributes?.['resource-id'];
+        if (idValue) {
+            locators.push({
+                type: 'ID',
+                label: 'Resource ID',
+                value: idValue,
+                reliability: 'high',
+                selector: { id: idValue },
+                syntax: `id: "${idValue}"`
+            });
+        }
+
+        // 3. Accessibility / Content Description
+        const descValue = element.contentDescription || element['content-desc'] || element.attributes?.['content-desc'] || element.hint;
+        if (descValue) {
+            locators.push({
+                type: 'Accessibility',
+                label: 'Accessibility ID',
+                value: descValue,
+                reliability: 'high',
+                selector: { accessibilityId: descValue },
+                syntax: `accessibilityId: "${descValue}"`
+            });
+        }
+
+        // 4. Class Name (Fallback)
+        const classValue = element.className || element.class || element.attributes?.class;
+        if (classValue) {
+            locators.push({
+                type: 'Class',
+                label: 'Class Name',
+                value: classValue,
+                reliability: 'low',
+                selector: { class: classValue },
+                syntax: `class: "${classValue}"`
+            });
+        }
+
+        return locators;
+    };
+
+    const formatMaestroYaml = (action, params) => {
+        const indent = '    ';
+
+        // Standard Maestro Shorthand for text/id if it's the only param
+        if (params.text && Object.keys(params).length === 1) {
+            const v = params.text;
+            const escapedV = (v.includes(':') || v.includes('"')) ? `"${v.replace(/"/g, '\\"')}"` : `"${v}"`;
+            return `- ${action}: ${escapedV}`;
+        }
+        if (params.id && Object.keys(params).length === 1) {
+            return `- ${action}:\n    id: "${params.id}"`;
+        }
+
+        let yaml = `- ${action}:\n`;
+
+        const formatValue = (val, level = 1) => {
+            const currIndent = indent.repeat(level);
+            if (typeof val === 'string') {
+                if (val.includes(':') || val.includes('"')) return `${currIndent}"${val.replace(/"/g, '\\"')}"\n`;
+                return `${currIndent}${val}\n`;
+            }
+            if (typeof val === 'object' && val !== null) {
+                let s = '';
+                for (const [k, v] of Object.entries(val)) {
+                    if (typeof v === 'object') {
+                        s += `${currIndent}${k}:\n${formatValue(v, level + 1)}`;
+                    } else {
+                        const escapedV = typeof v === 'string' && (v.includes(':') || v.includes('"')) ? `"${v.replace(/"/g, '\\"')}"` : v;
+                        s += `${currIndent}${k}: ${escapedV}\n`;
+                    }
+                }
+                return s;
+            }
+            return `${currIndent}${val}\n`;
+        };
+
+        for (const [k, v] of Object.entries(params)) {
+            if (typeof v === 'object') {
+                yaml += `${indent}${k}:\n${formatValue(v, 2)}`;
+            } else {
+                const escapedV = typeof v === 'string' && (v.includes(':') || v.includes('"')) ? `"${v.replace(/"/g, '\\"')}"` : v;
+                yaml += `${indent}${k}: ${escapedV}\n`;
+            }
+        }
+        return yaml;
+    };
+
+    // Generate Maestro command with selected locator
+    const generateCommand = (locator, commandType) => {
+        const commands = {
+            tap: `- tapOn:\n    ${locator.syntax}`,
+            assert: `- assertVisible:\n    ${locator.syntax}`,
+            input: `- tapOn:\n    ${locator.syntax}\n- inputText: "your text here"`,
+            swipe: `- swipe:\n    start: ${locator.syntax}\n    direction: UP`
+        };
+
+        return commands[commandType] || commands.tap;
+    };
+
+    // Copy to clipboard
+    const copyToClipboard = (text) => {
+        navigator.clipboard.writeText(text).then(() => {
+            addLog('success', 'Copied to clipboard');
+        }).catch(() => {
+            addLog('error', 'Failed to copy to clipboard');
+        });
+    };
+
+    const getStepLines = (content) => {
+        const lines = content.split('\n');
+        const stepLines = [];
+        let inSteps = false;
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (line === '---') {
+                inSteps = true;
+                continue;
+            }
+            if (inSteps && line.startsWith('- ')) {
+                stepLines.push(i + 1);
+            }
+        }
+        return stepLines;
+    };
+
+    const abortControllerRef = useRef(null);
+
+    const stopTest = () => {
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+            addLog('error', 'Test Stopped by User');
+            setIsRunning(false);
+        }
+    };
+
+    const runStep = async (step) => {
+        try {
+            const res = await fetch('http://localhost:8000/run-step', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ step })
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                addLog('success', `Executed: ${data.log}`);
+                // Sequential refresh
+                setTimeout(() => {
+                    setRefreshKey(Date.now());
+                    setHierarchyRefreshKey(prev => prev + 1);
+                }, 800);
+            } else {
+                addLog('error', `Step Failed: ${data.error || 'Unknown error'}`);
+            }
+        } catch (e) {
+            addLog('error', `Execution error: ${e.message}`);
+        }
+    };
+
+    const runTest = async () => {
+        if (!currentFile) return;
+
+        // Auto-save before running
+        await saveFile();
+
+        setIsRunning(true);
+        setLineStatuses({});
+        addLog('info', `Running ${currentFile.name}...`);
+
+        const stepLines = getStepLines(editorContent);
+        abortControllerRef.current = new AbortController();
+
+        try {
+            const response = await fetch('http://localhost:8000/run', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ yaml_content: editorContent }),
+                signal: abortControllerRef.current.signal
+            });
+
+            if (!response.body) throw new Error('No response body');
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n\n');
+                buffer = lines.pop() || '';
+
+                for (const rawLine of lines) {
+                    if (!rawLine.startsWith('data: ')) continue;
+                    const text = rawLine.replace('data: ', '').trim();
+
+                    if (text.startsWith('[DONE] EXIT_CODE:')) {
+                        const code = text.split(': ')[1];
+                        if (code === '0') addLog('success', 'Test Completed Successfully');
+                        else addLog('error', `Test Failed (Exit Code: ${code})`);
+                        continue;
+                    }
+
+                    if (text.startsWith('[ERROR]')) {
+                        addLog('error', text.replace('[ERROR]', ''));
+                        continue;
+                    }
+
+                    // Parse Maestro progress: [1/5] Step name (completed/failed/running)
+                    const match = text.match(/\[(\d+)\/(\d+)\]\s+(.*?)\s+\((.*?)\)/);
+                    if (match) {
+                        const stepIdx = parseInt(match[1], 10) - 1;
+                        const status = match[4].toLowerCase().trim();
+                        const stepDetail = match[3];
+
+                        if (status !== 'running' || stepDetail !== 'step') {
+                            addLog(status === 'failed' ? 'error' : 'info', text);
+                        }
+
+                        if (stepLines[stepIdx]) {
+                            const lineNum = stepLines[stepIdx];
+                            setLineStatuses(prev => ({
+                                ...prev,
+                                [lineNum]: status === 'completed' ? 'pass' : (status === 'failed' ? 'fail' : 'running')
+                            }));
+                        }
+                    } else {
+                        addLog('info', text);
+                    }
+                }
+            }
+        } catch (e) {
+            if (e.name === 'AbortError') {
+                console.log('Fetch aborted');
+            } else {
+                addLog('error', `Error: ${e.message}`);
+            }
+        } finally {
+            setIsRunning(false);
+            abortControllerRef.current = null;
+        }
+    };
+
+    const createTestFlow = async () => {
+        const { name, appId } = modalData;
+        if (!name.trim()) {
+            addLog('error', 'Test name is required');
+            return;
+        }
+        if (!appId) {
+            addLog('error', 'App Id is required');
+            return;
+        }
+
+        // Sanitize name: remove leading/trailing slashes/dots and handle extension
+        let baseName = name.trim().replace(/^[./\\]+/, "");
+        if (!baseName) {
+            addLog('error', 'Invalid test name');
+            return;
+        }
+
+        if (baseName.endsWith('.yaml') || baseName.endsWith('.yml')) {
+            // keep it
+        } else {
+            baseName += '.yaml';
+        }
+
+        const initialContent = `appId: ${appId}
+---
+- launchApp:
+    clearState: true`;
+
+        try {
+            setIsRunning(true);
+            addLog('info', `Creating test ${baseName}...`);
+
+            const res = await fetch('http://localhost:8000/files', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: baseName, type: 'file' })
+            });
+
+            if (!res.ok) {
+                let msg = 'Failed to create file';
+                try {
+                    const errorData = await res.json();
+                    msg = errorData.detail || msg;
+                } catch (e) {
+                    msg = `Server error: ${res.status} ${res.statusText} `;
+                }
+                throw new Error(msg);
+            }
+
+            const saveRes = await fetch('http://localhost:8000/file', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: baseName, content: initialContent })
+            });
+
+            if (!saveRes.ok) {
+                let msg = 'Failed to save content';
+                try {
+                    const errorData = await saveRes.json();
+                    msg = errorData.detail || msg;
+                } catch (e) {
+                    msg = `Server error: ${saveRes.status} ${saveRes.statusText} `;
+                }
+                throw new Error(msg);
+            }
+
+            setShowModal(false);
+            setModalData({ ...modalData, name: '' });
+            addLog('success', `Created test ${baseName} `);
+            fetchFiles();
+        } catch (e) {
+            console.error(e);
+            addLog('error', `Error creating test: ${e.message} `);
+        } finally {
+            setIsRunning(false);
+        }
+    };
+
+    const deleteItem = async (e, file) => {
+        e.stopPropagation();
+        if (!confirm(`Are you sure you want to delete ${file.name}?`)) return;
+
+        try {
+            const res = await fetch(`http://localhost:8000/file?path=${encodeURIComponent(file.path)}`, {
+                method: 'DELETE',
+            });
+
+            if (!res.ok) {
+                const data = await res.json();
+                throw new Error(data.detail || 'Failed to delete');
+            }
+
+            if (currentFile?.path === file.path) {
+                setCurrentFile(null);
+                setEditorContent('');
+            }
+            addLog('info', `Deleted ${file.name}`);
+            fetchFiles();
+        } catch (e) {
+            addLog('error', `Error deleting file: ${e.message}`);
+        }
+    };
+
+    const renameItem = async (e, file) => {
+        e.stopPropagation();
+        const newName = prompt("Enter new name:", file.name);
+        if (!newName || newName === file.name) return;
+
+        try {
+            const res = await fetch('http://localhost:8000/file', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ old_path: file.path, new_path: newName })
+            });
+            if (!res.ok) throw new Error('Rename failed');
+
+            addLog('info', `Renamed ${file.name} to ${newName}`);
+            if (currentFile?.path === file.path) {
+                setCurrentFile({ ...file, path: newName, name: newName });
+            }
+            fetchFiles();
+        } catch (e) {
+            addLog('error', `Error renaming: ${e.message}`);
+        }
+    };
+
+    // --- Interaction ---
+    const handleScreenClick = async (e) => {
+        if (!currentFile) {
+            addLog('info', 'Please select or create a test file first');
+            return;
+        }
+
+        const img = e.target;
+        const rect = img.getBoundingClientRect();
+        const xPct = ((e.clientX - rect.left) / rect.width) * 100;
+        const yPct = ((e.clientY - rect.top) / rect.height) * 100;
+
+        const x = (xPct / 100) * deviceInfo.width;
+        const y = (yPct / 100) * deviceInfo.height;
+
+        let bestMatch = null;
+        let minArea = Infinity;
+
+        elements.forEach(el => {
+            if (!el.bounds) return;
+            const { left, top, right, bottom } = el.bounds;
+            if (x >= left && x <= right && y >= top && y <= bottom) {
+                const area = (right - left) * (bottom - top);
+                const hasText = !!(el.text || el.attributes?.text || el.contentDescription || el['content-desc']);
+
+                // Maestro-style prioritization: Smallest element, but prefer those with text/ID
+                // Weight elements with text significantly lower to prefer them
+                const score = hasText ? area * 0.5 : area;
+
+                if (score < minArea) {
+                    minArea = score;
+                    bestMatch = el;
+                }
+            }
+        });
+
+        if (interactMode) {
+            // "AUTO-INSERT & RUN" Mode (Maestro Studio style)
+            let actionParams = null;
+            let label = "";
+
+            if (bestMatch) {
+                const locs = getAvailableLocators(bestMatch);
+                if (locs && locs.length > 0) {
+                    // Use the best locator (text, ID, etc.)
+                    const locator = locs[0];
+                    actionParams = locator.selector;
+                    label = `Tap ${locator.value}`;
+                } else {
+                    // Element found but no good locators - use center point
+                    const { left, top, right, bottom } = bestMatch.bounds;
+                    const centerX = ((left + right) / 2 / deviceInfo.width) * 100;
+                    const centerY = ((top + bottom) / 2 / deviceInfo.height) * 100;
+                    actionParams = { point: `${Math.round(centerX)}%,${Math.round(centerY)}%` };
+                    label = `Tap element at ${Math.round(centerX)}%, ${Math.round(centerY)}%`;
+                }
+            } else {
+                // No element found - use click coordinates
+                actionParams = { point: `${Math.round(xPct)}%,${Math.round(yPct)}%` };
+                label = `Tap at ${Math.round(xPct)}%, ${Math.round(yPct)}%`;
+            }
+
+            const stepCount = (editorContent.match(/^\s*-\s+/gm) || []).length + 1;
+            const yaml = formatMaestroYaml('tapOn', actionParams);
+            const cmd = `# ${stepCount}. ${label}\n${yaml}`;
+
+            setEditorContent(prev => prev + (prev.endsWith('\n') ? '' : '\n') + cmd + '\n');
+            addLog('info', `Inserting & Running: ${label}`);
+
+            // Execute on device
+            runStep({ tapOn: actionParams });
+            return;
+        }
+
+        if (showInspector) {
+            if (bestMatch) {
+                const { left: l, top: t, right: r, bottom: b } = bestMatch.bounds;
+                setPopupPosition({
+                    x: ((l + r) / 2 / deviceInfo.width) * 100,
+                    y: ((t + b) / 2 / deviceInfo.height) * 100
+                });
+                setSelectedElement(bestMatch);
+                setSelectedLocatorIndex(0);
+            } else {
+                setSelectedElement({
+                    text: `Point (${Math.round(xPct)}%, ${Math.round(yPct)}%)`,
+                    isPoint: true,
+                    bounds: { left: x, top: y, right: x, bottom: y }
+                });
+                setPopupPosition({ x: xPct, y: yPct });
+            }
+            return;
+        }
+
+        // Default: just manual insert current point if nothing else is active
+        const cmd = `- tapOn:\n    point: "${Math.round(xPct)}%,${Math.round(yPct)}%"\n`;
+        setEditorContent(prev => prev + (prev.endsWith('\n') ? '' : '\n') + cmd);
+        runStep({ tapOn: { point: `${Math.round(xPct)}%,${Math.round(yPct)}%` } });
+    };
+
+    // --- Render ---
+    return (
+        <div className="app-container">
+            <header className="header">
+                <div className="header-brand">
+                    <img src="/logo.png" alt="Ratl.ai Logo" className="header-logo" />
+                    <h2 className="header-title">Ratl Studio</h2>
+                </div>
+                <div className="header-controls">
+                    <div className="device-status">
+                        <span className={`status-dot ${deviceConnected ? 'connected' : ''}`} />
+                        {deviceConnected ? 'CONNECTED' : 'DISCONNECTED'}
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', background: 'rgba(0,0,0,0.2)', padding: '4px', borderRadius: '8px' }}>
+                        <button
+                            className={`btn ${interactMode ? 'btn-danger' : 'btn-secondary'}`}
+                            onClick={() => {
+                                setInteractMode(!interactMode);
+                                if (!interactMode) setShowInspector(false);
+                            }}
+                            title={interactMode ? "Stop Auto-Recording" : "Start Auto-Recording Intercations"}
+                        >
+                            <span style={{ width: '8px', height: '8px', background: interactMode ? '#ff3b30' : '#888', borderRadius: '50%', marginRight: '6px', animation: interactMode ? 'pulse 1s infinite' : 'none' }}></span>
+                            {interactMode ? 'STOP RECORDING' : 'INTERACT'}
+                        </button>
+                        <button className={`btn ${showInspector ? 'btn-primary' : 'btn-secondary'}`} onClick={() => {
+                            setShowInspector(!showInspector);
+                            if (!showInspector) setInteractMode(false);
+                        }}>
+                            {showInspector ? 'INSPECT' : 'INSPECT'}
+                        </button>
+                    </div>
+                </div>
+            </header>
+
+            <div className="main-layout">
+                {/* 1. Sidebar */}
+                <aside className="sidebar">
+                    <div className="sidebar-header">
+                        <span>EXPLORER</span>
+                    </div>
+                    <div className="sidebar-actions-row">
+                        <button onClick={() => setShowModal(true)} className="sidebar-action-btn">
+                            <NewTestIcon />
+                            <span>New Test</span>
+                        </button>
+                        <button onClick={() => {
+                            const folder = prompt('Folder Name:');
+                            if (folder) fetch('http://localhost:8000/files', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ path: folder, type: 'folder' })
+                            }).then(() => fetchFiles())
+                        }} className="sidebar-action-btn">
+                            <NewFolderIcon />
+                            <span>New Folder</span>
+                        </button>
+                    </div>
+                    <ul className="file-list">
+                        {files.map(file => (
+                            <li key={file.path} className={`file-item ${currentFile?.path === file.path ? 'active' : ''}`} onClick={() => loadFile(file)}>
+                                <div className="file-item-main">
+                                    <span className="file-item-icon">
+                                        {file.name.endsWith('.yaml') || file.name.endsWith('.yml') ? <FileIcon /> : <FolderIcon />}
+                                    </span>
+                                    <span className="file-item-name">{file.name}</span>
+                                </div>
+                                <div className="file-item-actions">
+                                    <button className="action-btn" onClick={(e) => renameItem(e, file)} title="Rename">
+                                        <EditIcon />
+                                    </button>
+                                    <button className="action-btn delete" onClick={(e) => deleteItem(e, file)} title="Delete">
+                                        <DeleteIcon />
+                                    </button>
+                                </div>
+                            </li>
+                        ))}
+                        {files.length === 0 && (
+                            <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.9em' }}>
+                                <p>No files yet.</p>
+                                <p>Click 📄+ to create a new test flow.</p>
+                            </div>
+                        )}
+                    </ul>
+                </aside>
+
+                {/* 2. Editor & Terminal */}
+                <div className="editor-pane">
+                    {currentFile ? (
+                        <>
+                            <div className="editor-tabs">
+                                <div className="tab active">
+                                    <span>{currentFile.name}</span>
+                                    <span style={{ fontSize: '12px', color: '#ccc', cursor: 'pointer' }}>×</span>
+                                </div>
+                            </div>
+
+                            <div className="editor-toolbar">
+                                <div style={{ display: 'flex', gap: '8px' }}>
+                                    <button className="btn btn-primary" onClick={runTest} disabled={isRunning}>
+                                        {isRunning ? 'Running...' : '▶ Run Locally'}
+                                    </button>
+                                    <button
+                                        className="btn btn-secondary"
+                                        onClick={stopTest}
+                                        disabled={!isRunning}
+                                        style={{ borderColor: isRunning ? '#ff3b30' : 'var(--border)', color: isRunning ? '#ff3b30' : 'var(--text-secondary)' }}
+                                    >
+                                        ⏹ Stop
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="editor-container">
+                                <div className="line-numbers" ref={lineNumbersRef}>
+                                    {Array.from({ length: lineCount }, (_, i) => {
+                                        const ln = i + 1;
+                                        const status = lineStatuses[ln];
+                                        return (
+                                            <div key={ln} className="line-number-cell">
+                                                <span className="line-number-text" style={{ minWidth: '32px', textAlign: 'right', fontWeight: '500' }}>{ln}</span>
+                                                <div className="line-status-icon" style={{ width: '24px', display: 'flex', justifyContent: 'center', marginLeft: '8px' }}>
+                                                    {status === 'pass' && <span className="status-pass">✅</span>}
+                                                    {status === 'fail' && <span className="status-fail">❌</span>}
+                                                    {status === 'running' && <span className="status-running">⏳</span>}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                                <textarea
+                                    className="editor-textarea"
+                                    value={editorContent}
+                                    onChange={(e) => setEditorContent(e.target.value)}
+                                    onScroll={(e) => {
+                                        if (lineNumbersRef.current) {
+                                            lineNumbersRef.current.scrollTop = e.target.scrollTop;
+                                        }
+                                    }}
+                                    spellCheck="false"
+                                />
+                            </div>
+                        </>
+                    ) : (
+                        <div className="editor-placeholder">Select a flow to edit</div>
+                    )}
+
+                    {/* Terminal (VS Code Style) */}
+                    <div className="terminal-panel">
+                        <div className="terminal-header">
+                            <div className="terminal-tabs">
+                                <button className="terminal-tab">PROBLEMS</button>
+                                <button className="terminal-tab active">OUTPUT</button>
+                                <button className="terminal-tab">DEBUG CONSOLE</button>
+                                <button className="terminal-tab">TERMINAL</button>
+                            </div>
+                            <div className="terminal-actions">
+                                <button className="action-btn" title="Scroll to Top" onClick={() => {
+                                    if (terminalEndRef.current?.parentElement) {
+                                        terminalEndRef.current.parentElement.scrollTop = 0;
+                                    }
+                                }}>
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>
+                                </button>
+                                <button className="action-btn" title="Scroll to Bottom" onClick={() => {
+                                    if (terminalEndRef.current?.parentElement) {
+                                        terminalEndRef.current.parentElement.scrollTop = terminalEndRef.current.parentElement.scrollHeight;
+                                    }
+                                }}>
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                                </button>
+                                <button className="action-btn" title="Clear Terminal" onClick={clearLogs}>
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div className="terminal-content">
+                            {logs.map((log, i) => (
+                                <div key={i} className={`terminal-line terminal-${log.type}`}>
+                                    <span className="time">[{log.time}]</span>
+                                    <span className="terminal-text">{log.text}</span>
+                                </div>
+                            ))}
+                            <div ref={terminalEndRef} />
+                        </div>
+                    </div>
+                </div>
+
+                {/* 3. Device & Inspector */}
+                <aside className={`device-pane ${showInspector ? 'inspector-active' : ''}`}>
+
+                    {!deviceConnected ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: '1rem', color: 'var(--text-secondary)' }}>
+                            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                                <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
+                                <line x1="12" y1="18" x2="12.01" y2="18"></line>
+                                <line x1="1" y1="1" x2="23" y2="23"></line>
+                            </svg>
+                            <div style={{ textAlign: 'center' }}>
+                                <div style={{ fontSize: '1rem', fontWeight: '600', color: 'var(--text-primary)', marginBottom: '0.5rem' }}>No Device Connected</div>
+                                <div style={{ fontSize: '0.85rem' }}>Connect a device or emulator to continue</div>
+                            </div>
+                        </div>
+                    ) : (
+                        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+                            <div style={{
+                                padding: '0.5rem 1rem',
+                                background: 'rgba(16, 185, 129, 0.1)',
+                                borderBottom: '1px solid rgba(16, 185, 129, 0.2)',
+                                color: '#10b981',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '8px'
+                            }}>
+                                <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#10b981' }}></div>
+                                <span style={{ fontSize: '10px', fontWeight: 800, letterSpacing: '0.05em' }}>DEVICE CONNECTED</span>
+                            </div>
+
+                            <div className="device-content-wrapper" style={{
+                                display: 'flex',
+                                flexDirection: 'row',
+                                justifyContent: 'center',
+                                alignItems: 'start',
+                                gap: '24px',
+                                height: 'calc(100% - 40px)',
+                                width: '100%',
+                                padding: '20px',
+                                overflow: 'hidden'
+                            }}>
+                                <div className="device-frame" style={{
+                                    position: 'relative',
+                                    aspectRatio: `${deviceInfo.width} / ${deviceInfo.height}`,
+                                    flexShrink: 0
+                                }}>
+                                    <img
+                                        src={`http://localhost:8000/screenshot?t=${refreshKey}`}
+                                        className="device-screen"
+                                        alt="Device Screen"
+                                        onClick={handleScreenClick}
+                                        onLoad={onScreenLoad}
+                                        onError={() => setTimeout(onScreenLoad, 1000)} // Retry on error
+                                    />
+
+                                    {showInspector && deviceConnected && (
+                                        <div className="inspector-layer">
+                                            {/* Crosshair Lines */}
+                                            {selectedElement && (
+                                                <>
+                                                    <div
+                                                        className="inspector-crosshair-v"
+                                                        style={{ left: `${popupPosition?.x}%` }}
+                                                    />
+                                                    <div
+                                                        className="inspector-crosshair-h"
+                                                        style={{ top: `${popupPosition?.y}%` }}
+                                                    />
+                                                </>
+                                            )}
+
+                                            {elements.map((el, i) => {
+                                                if (!el.bounds) return null;
+                                                const { left: l, top: t, right: r, bottom: b } = el.bounds;
+                                                const left = (l / deviceInfo.width) * 100;
+                                                const top = (t / deviceInfo.height) * 100;
+                                                const width = ((r - l) / deviceInfo.width) * 100;
+                                                const height = ((b - t) / deviceInfo.height) * 100;
+
+                                                return (
+                                                    <div
+                                                        key={i}
+                                                        className={`inspector-element ${selectedElement === el ? 'selected' : ''}`}
+                                                        style={{
+                                                            left: `${left}%`,
+                                                            top: `${top}%`,
+                                                            width: `${width}%`,
+                                                            height: `${height}%`
+                                                        }}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            const centerX = ((l + r) / 2 / deviceInfo.width) * 100;
+                                                            const centerY = ((t + b) / 2 / deviceInfo.height) * 100;
+                                                            setPopupPosition({ x: centerX, y: centerY });
+                                                            setSelectedElement(el);
+                                                            setSelectedLocatorIndex(0);
+                                                        }}
+                                                        title={el.text || el['resource-id'] || el.class}
+                                                    />
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Side Inspector Panel */}
+                                {selectedElement && (
+                                    <div className="inspector-sidebar-panel" style={{
+                                        width: '340px',
+                                        height: '100%',
+                                        background: 'var(--bg-secondary)',
+                                        border: '1px solid var(--border)',
+                                        borderRadius: '16px',
+                                        boxShadow: '0 20px 50px rgba(0,0,0,0.5)',
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        overflow: 'hidden',
+                                        animation: 'sidebarIn 0.3s cubic-bezier(0.16, 1, 0.3, 1)'
+                                    }}>
+                                        <div style={{ padding: '16px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--accent)' }}></div>
+                                                <span style={{ fontSize: '11px', fontWeight: 800, color: '#fff', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Inspector</span>
+                                            </div>
+                                            <div style={{ display: 'flex', gap: '4px' }}>
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        fetchHierarchy();
+                                                        setRefreshKey(Date.now());
+                                                    }}
+                                                    className={isFetchingHierarchy ? 'spin' : ''}
+                                                    style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: '14px', padding: '4px', display: 'flex', alignItems: 'center' }}
+                                                    title="Refresh Hierarchy"
+                                                >
+                                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 4v6h-6"></path><path d="M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                                                </button>
+                                                <button onClick={() => setSelectedElement(null)} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: '18px', padding: '4px' }}>×</button>
+                                            </div>
+                                        </div>
+
+                                        <div style={{ flex: 1, overflowY: 'auto', padding: '16px' }}>
+                                            <div style={{ marginBottom: '20px' }}>
+                                                <div style={{ fontSize: '9px', color: '#666', fontWeight: 800, textTransform: 'uppercase', marginBottom: '8px' }}>Selected Element</div>
+                                                <div style={{ padding: '12px', background: 'rgba(255,255,255,0.03)', borderRadius: '12px', border: '1px solid var(--border)' }}>
+                                                    <div style={{ fontSize: '14px', fontWeight: '700', color: '#fff', marginBottom: '6px', wordBreak: 'break-all' }}>
+                                                        {(() => {
+                                                            const text = selectedElement.text || (selectedElement.attributes?.text) || selectedElement.contentDescription || selectedElement['content-desc'] || selectedElement.attributes?.['content-desc'];
+                                                            if (text && !selectedElement.isPoint) return text;
+                                                            if (selectedElement.isPoint) return `Location: ${Math.round(popupPosition?.x)}%, ${Math.round(popupPosition?.y)}%`;
+                                                            const resId = selectedElement.resourceId || selectedElement['resource-id'] || selectedElement.attributes?.['resource-id'];
+                                                            if (resId) return resId.split('/').pop();
+                                                            return selectedElement.className?.split('.').pop() || 'Unknown Element';
+                                                        })()}
+                                                    </div>
+                                                    <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+                                                        <div style={{ padding: '2px 6px', borderRadius: '4px', background: 'rgba(44, 104, 246, 0.2)', color: 'var(--accent)', fontSize: '9px', fontWeight: 800, textTransform: 'uppercase' }}>
+                                                            {selectedElement.isPoint ? 'Point' : (selectedElement.text ? 'Text' : (selectedElement.resourceId || selectedElement['resource-id'] ? 'ID' : 'Element'))}
+                                                        </div>
+                                                        <div style={{ fontSize: '10px', color: '#666', fontFamily: 'JetBrains Mono' }}>
+                                                            {selectedElement.isPoint ? `${Math.round(popupPosition?.x)}%, ${Math.round(popupPosition?.y)}%` : selectedElement.className || ''}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* Attributes Section */}
+                                            {!selectedElement.isPoint && (
+                                                <div style={{ marginBottom: '20px' }}>
+                                                    <div style={{ fontSize: '9px', color: '#666', fontWeight: 800, textTransform: 'uppercase', marginBottom: '8px' }}>Attributes</div>
+                                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                                                        {[
+                                                            { label: 'Clickable', val: selectedElement.clickable || selectedElement.attributes?.clickable === 'true' },
+                                                            { label: 'Enabled', val: selectedElement.enabled || selectedElement.attributes?.enabled === 'true' },
+                                                            { label: 'Focusable', val: selectedElement.focusable || selectedElement.attributes?.focusable === 'true' },
+                                                            { label: 'Checked', val: selectedElement.checked || selectedElement.attributes?.checked === 'true' },
+                                                            { label: 'Long Clickable', val: selectedElement['long-clickable'] || selectedElement.attributes?.['long-clickable'] === 'true' },
+                                                            { label: 'Scrollable', val: selectedElement.scrollable || selectedElement.attributes?.scrollable === 'true' }
+                                                        ].map(attr => (
+                                                            <div key={attr.label} style={{
+                                                                display: 'flex',
+                                                                justifyContent: 'space-between',
+                                                                alignItems: 'center',
+                                                                padding: '6px 10px',
+                                                                background: attr.val ? 'rgba(16, 185, 129, 0.05)' : 'rgba(255,255,255,0.02)',
+                                                                borderRadius: '6px',
+                                                                border: `1px solid ${attr.val ? 'rgba(16, 185, 129, 0.2)' : 'var(--border)'}`,
+                                                                opacity: attr.val ? 1 : 0.5
+                                                            }}>
+                                                                <span style={{ fontSize: '10px', color: '#888' }}>{attr.label}</span>
+                                                                <span style={{ fontSize: '10px', fontWeight: 'bold', color: attr.val ? '#10b981' : '#666' }}>
+                                                                    {attr.val ? 'YES' : 'NO'}
+                                                                </span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {(() => {
+                                                const locators = getAvailableLocators(selectedElement);
+                                                const currentLocator = selectedElement.isPoint
+                                                    ? { selector: { point: `${Math.round(popupPosition?.x || 0)}%,${Math.round(popupPosition?.y || 0)}%` }, syntax: `point: "${Math.round(popupPosition?.x || 0)}%,${Math.round(popupPosition?.y || 0)}%"` }
+                                                    : (locators[selectedLocatorIndex] || locators[0] || { selector: { point: `${Math.round(popupPosition?.x || 0)}%,${Math.round(popupPosition?.y || 0)}%` }, syntax: `point: "${Math.round(popupPosition?.x || 0)}%,${Math.round(popupPosition?.y || 0)}%"` });
+
+                                                const selector = currentLocator.selector;
+                                                const stepCount = (editorContent.match(/^\s*-\s+/gm) || []).length + 1;
+
+                                                const groups = [
+                                                    {
+                                                        title: '👉 Tap & Click',
+                                                        actions: [
+                                                            { label: 'Tap Element', yaml: formatMaestroYaml('tapOn', selector), cmd: 'tapOn' },
+                                                            { label: 'Double Tap', yaml: formatMaestroYaml('doubleTapOn', selector), cmd: 'doubleTapOn' },
+                                                            { label: 'Long Press', yaml: formatMaestroYaml('longPressOn', selector), cmd: 'longPressOn' }
+                                                        ]
+                                                    },
+                                                    {
+                                                        title: '🖐️ Swipe & Gestures',
+                                                        actions: [
+                                                            { label: 'Swipe Up', yaml: formatMaestroYaml('swipe', { direction: 'UP' }), cmd: 'swipe' },
+                                                            { label: 'Swipe Down', yaml: formatMaestroYaml('swipe', { direction: 'DOWN' }), cmd: 'swipe' },
+                                                            { label: 'Swipe Left', yaml: formatMaestroYaml('swipe', { direction: 'LEFT' }), cmd: 'swipe' },
+                                                            { label: 'Swipe Right', yaml: formatMaestroYaml('swipe', { direction: 'RIGHT' }), cmd: 'swipe' }
+                                                        ]
+                                                    },
+                                                    {
+                                                        title: '📜 Scroll',
+                                                        actions: [
+                                                            { label: 'Scroll Down', yaml: `- scroll:\n    direction: DOWN`, cmd: 'scroll' },
+                                                            { label: 'Scroll Up', yaml: `- scroll:\n    direction: UP`, cmd: 'scroll' },
+                                                            { label: 'Scroll to Element', yaml: formatMaestroYaml('scrollUntilVisible', { element: selector, direction: 'DOWN' }), cmd: 'scrollUntilVisible' }
+                                                        ]
+                                                    },
+                                                    {
+                                                        title: '⌨️ Input & Text',
+                                                        actions: [
+                                                            { label: 'Tap and Type', yaml: `${formatMaestroYaml('tapOn', selector)}\n- inputText: "your text"`, cmd: 'tapOn' },
+                                                            { label: 'Input Text', yaml: `- inputText: "your text here"`, cmd: 'inputText' },
+                                                            { label: 'Erase Text', yaml: `- eraseText: 10`, cmd: 'eraseText' },
+                                                            { label: 'Press Enter', yaml: `- pressKey: Enter`, cmd: 'pressKey' },
+                                                            { label: 'Press Backspace', yaml: `- pressKey: Backspace`, cmd: 'pressKey' }
+                                                        ]
+                                                    },
+                                                    {
+                                                        title: '👁️ Assertions',
+                                                        actions: [
+                                                            { label: 'Assert Visible', yaml: formatMaestroYaml('assertVisible', selector), cmd: 'assertVisible' },
+                                                            { label: 'Assert Not Visible', yaml: formatMaestroYaml('assertNotVisible', selector), cmd: 'assertNotVisible' },
+                                                            { label: 'Assert Text', yaml: `- assertVisible: "Expected Text"`, cmd: 'assertVisible' }
+                                                        ]
+                                                    },
+                                                    {
+                                                        title: '⏱️ Wait & Timing',
+                                                        actions: [
+                                                            { label: 'Wait for Visible', yaml: formatMaestroYaml('extendedWaitUntil', { visible: selector, timeout: 10000 }), cmd: 'extendedWaitUntil' },
+                                                            { label: 'Wait for Not Visible', yaml: formatMaestroYaml('extendedWaitUntil', { notVisible: selector, timeout: 10000 }), cmd: 'extendedWaitUntil' },
+                                                            { label: 'Wait 2 Seconds', yaml: `- wait: 2000`, cmd: 'wait' }
+                                                        ]
+                                                    },
+                                                    {
+                                                        title: '🧭 Navigation',
+                                                        actions: [
+                                                            { label: 'Go Back', yaml: `- back`, cmd: 'back' },
+                                                            { label: 'Hide Keyboard', yaml: `- hideKeyboard`, cmd: 'hideKeyboard' },
+                                                            { label: 'Open Link', yaml: `- openLink: "https://example.com"`, cmd: 'openLink' }
+                                                        ]
+                                                    },
+                                                    {
+                                                        title: '📸 Capture & Debug',
+                                                        actions: [
+                                                            { label: 'Take Screenshot', yaml: `- takeScreenshot: screenshot.png`, cmd: 'takeScreenshot' },
+                                                            { label: 'Start Recording', yaml: `- startRecording: video.mp4`, cmd: 'startRecording' },
+                                                            { label: 'Stop Recording', yaml: `- stopRecording`, cmd: 'stopRecording' }
+                                                        ]
+                                                    }
+                                                ];
+
+                                                return (
+                                                    <>
+                                                        {!selectedElement.isPoint && (
+                                                            <div style={{ marginBottom: '24px' }}>
+                                                                <div style={{ fontSize: '9px', color: 'var(--accent)', fontWeight: 800, textTransform: 'uppercase', marginBottom: '12px', letterSpacing: '0.05em' }}>Available Selectors</div>
+                                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                                                    {locators.map((loc, idx) => (
+                                                                        <div
+                                                                            key={idx}
+                                                                            onClick={() => setSelectedLocatorIndex(idx)}
+                                                                            style={{
+                                                                                padding: '12px',
+                                                                                background: selectedLocatorIndex === idx ? 'rgba(44, 104, 246, 0.1)' : 'rgba(255,255,255,0.02)',
+                                                                                border: `1px solid ${selectedLocatorIndex === idx ? 'var(--accent)' : 'var(--border)'}`,
+                                                                                borderRadius: '10px',
+                                                                                cursor: 'pointer',
+                                                                                transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+                                                                                display: 'flex',
+                                                                                justifyContent: 'space-between',
+                                                                                alignItems: 'center',
+                                                                                position: 'relative',
+                                                                                overflow: 'hidden'
+                                                                            }}
+                                                                        >
+                                                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', flex: 1, marginRight: '8px' }}>
+                                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                                                    <div style={{ fontSize: '8px', color: selectedLocatorIndex === idx ? 'var(--accent)' : '#666', fontWeight: 800, textTransform: 'uppercase' }}>{loc.type}</div>
+                                                                                    {loc.reliability === 'high' && <div style={{ width: '4px', height: '4px', borderRadius: '50%', background: '#10b981' }} title="High Reliability"></div>}
+                                                                                </div>
+                                                                                <div style={{ fontSize: '11px', color: selectedLocatorIndex === idx ? '#fff' : '#aaa', wordBreak: 'break-all', fontFamily: 'JetBrains Mono' }}>{loc.value}</div>
+                                                                            </div>
+                                                                            <button
+                                                                                onClick={(e) => {
+                                                                                    e.stopPropagation();
+                                                                                    navigator.clipboard.writeText(loc.value);
+                                                                                    addLog('success', `Copied ${loc.type} to clipboard`);
+                                                                                }}
+                                                                                style={{
+                                                                                    background: 'rgba(255,255,255,0.05)',
+                                                                                    border: 'none',
+                                                                                    borderRadius: '6px',
+                                                                                    padding: '6px',
+                                                                                    color: '#666',
+                                                                                    cursor: 'pointer',
+                                                                                    display: 'flex',
+                                                                                    alignItems: 'center',
+                                                                                    justifyContent: 'center',
+                                                                                    transition: 'all 0.2s'
+                                                                                }}
+                                                                                title="Copy"
+                                                                            >
+                                                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                                                                            </button>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                        )}
+
+                                                        <div style={{ marginTop: '24px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                                                            {groups.map((group, gIdx) => (
+                                                                <div key={gIdx}>
+                                                                    <div style={{ fontSize: '10px', fontWeight: 800, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '12px' }}>
+                                                                        {group.title}
+                                                                    </div>
+                                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                                                        {group.actions.map((action, aIdx) => (
+                                                                            <div key={aIdx} style={{ display: 'flex', gap: '4px' }}>
+                                                                                <button
+                                                                                    className="inspector-action-btn"
+                                                                                    style={{ flex: 1 }}
+                                                                                    onClick={(e) => {
+                                                                                        e.stopPropagation();
+                                                                                        const cmd = `# ${stepCount}. ${action.label}\n${action.yaml}`;
+                                                                                        setEditorContent(prev => prev + (prev.endsWith('\n') ? '' : '\n') + cmd + '\n');
+                                                                                        addLog('success', `Added to YAML: ${action.label}`);
+                                                                                    }}
+                                                                                >
+                                                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+                                                                                        <span style={{ fontWeight: 600 }}>{action.label}</span>
+                                                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                                                                                    </div>
+                                                                                    <code style={{ fontSize: '9px', opacity: 0.7, color: 'var(--accent)', marginTop: '4px', display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                                                        {action.yaml.replace(/\n/g, ' ').split(':')[1]?.trim() || action.yaml.replace(/\s+/g, ' ')}
+                                                                                    </code>
+                                                                                </button>
+                                                                                <button
+                                                                                    className="btn-run-small"
+                                                                                    onClick={(e) => {
+                                                                                        e.stopPropagation();
+
+                                                                                        // Build step object based on command type
+                                                                                        let stepObj = {};
+                                                                                        const cmd = action.cmd;
+
+                                                                                        // Commands with selectors
+                                                                                        if (['tapOn', 'doubleTapOn', 'longPressOn', 'assertVisible', 'assertNotVisible'].includes(cmd)) {
+                                                                                            stepObj[cmd] = selector;
+                                                                                        }
+                                                                                        // Scroll commands
+                                                                                        else if (cmd === 'scroll') {
+                                                                                            stepObj.scroll = { direction: action.yaml.includes('DOWN') ? 'DOWN' : 'UP' };
+                                                                                        }
+                                                                                        else if (cmd === 'scrollUntilVisible') {
+                                                                                            stepObj.scrollUntilVisible = { element: selector, direction: 'DOWN' };
+                                                                                        }
+                                                                                        // Swipe commands
+                                                                                        else if (cmd === 'swipe') {
+                                                                                            const dir = action.yaml.match(/direction:\s*(\w+)/)?.[1] || 'UP';
+                                                                                            stepObj.swipe = { direction: dir };
+                                                                                        }
+                                                                                        // Wait commands
+                                                                                        else if (cmd === 'extendedWaitUntil') {
+                                                                                            if (action.yaml.includes('notVisible')) {
+                                                                                                stepObj.extendedWaitUntil = { notVisible: selector, timeout: 10000 };
+                                                                                            } else {
+                                                                                                stepObj.extendedWaitUntil = { visible: selector, timeout: 10000 };
+                                                                                            }
+                                                                                        }
+                                                                                        else if (cmd === 'wait') {
+                                                                                            stepObj.wait = 2000;
+                                                                                        }
+                                                                                        // Simple commands
+                                                                                        else if (['back', 'hideKeyboard', 'takeScreenshot', 'startRecording', 'stopRecording'].includes(cmd)) {
+                                                                                            stepObj[cmd] = true;
+                                                                                        }
+                                                                                        // Input commands (skip for now as they need user input)
+                                                                                        else if (['inputText', 'eraseText', 'pressKey', 'openLink'].includes(cmd)) {
+                                                                                            addLog('info', `${action.label} - Please edit the YAML to customize`);
+                                                                                            return;
+                                                                                        }
+
+                                                                                        if (Object.keys(stepObj).length > 0) {
+                                                                                            addLog('info', `Running: ${action.label}`);
+                                                                                            runStep(stepObj);
+                                                                                        }
+                                                                                    }}
+                                                                                    title="Run Step Now"
+                                                                                >
+                                                                                    ▶
+                                                                                </button>
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </>
+                                                );
+                                            })()}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </aside>
+            </div>
+
+            {/* Modal */}
+            {showModal && (
+                <div className="modal-overlay" onClick={() => setShowModal(false)}>
+                    <div className="modal-content" onClick={e => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <h2>New Test Flow</h2>
+                            <button className="modal-close" onClick={() => setShowModal(false)}>×</button>
+                        </div>
+                        <div className="modal-body">
+                            <div className="modal-form">
+                                <div className="modal-tabs">
+                                    <button className={`modal-tab ${modalData.type === 'Mobile Test' ? 'active' : ''}`} onClick={() => setModalData({ ...modalData, type: 'Mobile Test' })}>📱 MOBILE</button>
+                                    <button className={`modal-tab ${modalData.type === 'Web Test' ? 'active' : ''}`} onClick={() => setModalData({ ...modalData, type: 'Web Test' })}>🌐 WEB</button>
+                                    <button className={`modal-tab ${modalData.type === 'Javascript File' ? 'active' : ''}`} onClick={() => setModalData({ ...modalData, type: 'Javascript File' })}>📄 JS</button>
+                                </div>
+                                <div className="form-group">
+                                    <label>Test Name</label>
+                                    <div className="input-with-suffix">
+                                        <input
+                                            placeholder="e.g. login_flow"
+                                            value={modalData.name}
+                                            onChange={(e) => setModalData({ ...modalData, name: e.target.value })}
+                                        />
+                                        <span>.yaml</span>
+                                    </div>
+                                </div>
+                                <div className="form-group">
+                                    <label>App Identifier</label>
+                                    <div style={{ display: 'flex', gap: '8px' }}>
+                                        <select
+                                            style={{ flex: 1 }}
+                                            value={deviceConnected ? modalData.appId : ''}
+                                            onChange={(e) => setModalData({ ...modalData, appId: e.target.value })}
+                                            disabled={!deviceConnected}
+                                        >
+                                            {!deviceConnected ? (
+                                                <option value="">Device is not connected</option>
+                                            ) : packages.length > 0 ? (
+                                                packages.map(pkg => (
+                                                    <option key={pkg} value={pkg}>{pkg}</option>
+                                                ))
+                                            ) : (
+                                                <option value="com.hamleys_webapp">com.hamleys_webapp</option>
+                                            )}
+                                        </select>
+                                        <button className="btn btn-secondary" onClick={fetchPackages} title="Refresh Packages" disabled={!deviceConnected}>🔄</button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="modal-preview">
+                                <div style={{ fontSize: '10px', color: 'var(--accent)', marginBottom: '12px', fontWeight: 700, letterSpacing: '0.1em' }}>PREVIEW</div>
+                                <pre>
+                                    {`appId: ${modalData.appId}\n---\n- launchApp:\n    clearState: true`}
+                                </pre>
+                            </div>
+                        </div>
+                        <div className="modal-footer">
+                            <button className="btn btn-secondary" onClick={() => setShowModal(false)}>Cancel</button>
+                            <button className="btn btn-primary" onClick={createTestFlow} disabled={!modalData.name}>Create Test</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+export default App;
