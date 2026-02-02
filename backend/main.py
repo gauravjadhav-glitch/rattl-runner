@@ -34,6 +34,9 @@ class FileSaveRequest(BaseModel):
     path: str
     content: str
 
+class TerminalRequest(BaseModel):
+    command: str
+
 # --- Device & Run ---
 
 @app.get("/devices")
@@ -167,6 +170,14 @@ def get_safe_path(path):
 def list_files():
     try:
         files = []
+        
+        # 1. Include start.sh from the root if it exists
+        root_dir = os.path.abspath(os.path.join(WORKSPACE_DIR, ".."))
+        start_sh = os.path.join(root_dir, "start.sh")
+        if os.path.exists(start_sh):
+            files.append({"name": "start.sh", "path": "../start.sh"})
+            
+        # 2. Include YAML files and folders from WORKSPACE_DIR
         for root, dirs, filenames in os.walk(WORKSPACE_DIR):
              # Add directories
              for date_dir in dirs:
@@ -181,8 +192,8 @@ def list_files():
                     rel_path = os.path.relpath(full_path, start=WORKSPACE_DIR)
                     files.append({"name": rel_path, "path": rel_path})
         
-        # Sort by name
-        files.sort(key=lambda x: x["name"])
+        # Sort by name (keeping start.sh at top or bottom)
+        files.sort(key=lambda x: (x["path"] != "../start.sh", x["name"]))
         return {"files": files}
     except Exception as e:
         return {"files": [], "error": str(e)}
@@ -312,38 +323,105 @@ def get_screenshot():
     
     # Method 1: exec-out (Fastest)
     try:
-        result = subprocess.run(["adb", "exec-out", "screencap", "-p"], capture_output=True, timeout=2)
+        result = subprocess.run(["adb", "exec-out", "screencap", "-p"], capture_output=True, timeout=3)
         if result.returncode == 0 and len(result.stdout) > 1000 and result.stdout.startswith(b'\x89PNG'):
              return Response(content=result.stdout, media_type="image/png")
-    except subprocess.TimeoutExpired:
-        print("Screenshot Method 1 (exec-out) timed out, trying fallback...")
     except Exception as e:
-        print(f"Screenshot Method 1 failed: {e}")
+        print(f"[SCREENSHOT] Method 1 failed: {e}")
 
     # Method 2: shell screencap -p (Direct Stream)
     try:
-        shell_res = subprocess.run(["adb", "shell", "screencap", "-p"], capture_output=True, timeout=4)
+        shell_res = subprocess.run(["adb", "shell", "screencap", "-p"], capture_output=True, timeout=5)
         if shell_res.returncode == 0 and len(shell_res.stdout) > 1000 and shell_res.stdout.startswith(b'\x89PNG'):
              return Response(content=shell_res.stdout, media_type="image/png")
-    except subprocess.TimeoutExpired:
-        print("Screenshot Method 2 (shell stream) timed out, trying fallback...")
     except Exception as e:
-        print(f"Screenshot Method 2 failed: {e}")
+        print(f"[SCREENSHOT] Method 2 failed: {e}")
 
-    # Method 3: File-based Fallback (Slowest but most robust)
+    # Method 3: File-based Fallback (Most robust)
     try:
-        print("Streaming methods failed, performing file-based capture...")
-        subprocess.run(["adb", "shell", "screencap", "-p", "/data/local/tmp/ratl_screen.png"], check=True, timeout=5)
+        print("[SCREENSHOT] Using file-based fallback...")
+        subprocess.run(["adb", "shell", "screencap", "-p", "/data/local/tmp/ratl_screen.png"], check=True, timeout=7)
         cat_res = subprocess.run(["adb", "exec-out", "cat", "/data/local/tmp/ratl_screen.png"], capture_output=True, timeout=5)
         
         if cat_res.returncode == 0 and len(cat_res.stdout) > 100:
              return Response(content=cat_res.stdout, media_type="image/png")
     except Exception as e:
-        print(f"Screenshot Method 3 failed: {e}")
+        print(f"[SCREENSHOT] Method 3 failed: {e}")
             
     # If all failed
-    raise HTTPException(status_code=500, detail="Screenshot failed with all 3 methods")
+    raise HTTPException(status_code=503, detail="Screenshot failed with all methods")
             
+
+
+# --- Terminal (Stateful & Streaming) ---
+
+# Global TERMINAL_CWD to maintain state between requests
+# We force it to the project root (one level up from the backend folder)
+TERMINAL_CWD = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+@app.post("/terminal")
+async def terminal_command(request: TerminalRequest):
+    global TERMINAL_CWD
+    
+    # Ensure it's initialized (safety check)
+    if 'TERMINAL_CWD' not in globals() or not TERMINAL_CWD:
+        TERMINAL_CWD = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    
+    cmd = request.command.strip()
+    if not cmd:
+        return {"output": "", "exit_code": 0, "cwd": TERMINAL_CWD}
+
+    # Handle 'cd' separately to maintain state
+    if cmd.startswith("cd "):
+        target = cmd[3:].strip()
+        if not target or target == "~":
+            target = os.path.expanduser("~")
+        
+        # Resolve target path
+        new_path = os.path.abspath(os.path.join(TERMINAL_CWD, target))
+        if os.path.isdir(new_path):
+            TERMINAL_CWD = new_path
+            return {"output": f"Changed directory to {TERMINAL_CWD}", "exit_code": 0, "cwd": TERMINAL_CWD}
+        else:
+            return {"output": f"cd: no such file or directory: {target}", "exit_code": 1, "cwd": TERMINAL_CWD}
+
+    async def run_command_stream(command):
+        global TERMINAL_CWD
+        try:
+            # Smart Path Handling: If user types 'script.sh' and it exists in CWD, prepend './'
+            parts = command.split()
+            if parts and not parts[0].startswith("./") and not parts[0].startswith("/") and not parts[0].startswith(".."):
+                script_path = os.path.join(TERMINAL_CWD, parts[0])
+                if os.path.isfile(script_path) and os.access(script_path, os.X_OK):
+                    command = "./" + command
+                    yield f"data: [INFO] Automatically prepended './' for local executable\n\n"
+
+            # Use shell to support scripts, piping, etc.
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=TERMINAL_CWD,
+                bufsize=1,
+                universal_newlines=True
+            )
+
+            # Read output line by line and yield it
+            for line in process.stdout:
+                # Remove trailing newline as frontend addLog adds its own or handles lines
+                # But keep internal structure
+                yield f"data: {line.rstrip()}\n\n"
+            
+            process.wait()
+            yield f"data: [DONE] EXIT_CODE: {process.returncode}\n\n"
+            yield f"data: [CWD] {TERMINAL_CWD}\n\n"
+            
+        except Exception as e:
+            yield f"data: [ERROR] {str(e)}\n\n"
+
+    return StreamingResponse(run_command_stream(cmd), media_type="text/event-stream")
 
 
 if __name__ == "__main__":

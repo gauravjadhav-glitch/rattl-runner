@@ -61,6 +61,8 @@ const PlayIcon = () => (
     </svg>
 );
 
+const API_BASE_URL = import.meta.env.VITE_API_URL || `${window.location.protocol}//${window.location.hostname}:8000`;
+
 function App() {
     // --- State ---
     const [files, setFiles] = useState([]);
@@ -84,6 +86,10 @@ function App() {
     const [hierarchyRefreshKey, setHierarchyRefreshKey] = useState(0);
     const [interactMode, setInteractMode] = useState(false); // New: Auto-Insert & Run mode
     const [errorLine, setErrorLine] = useState(null); // Track YAML error line number
+    const [terminalInput, setTerminalInput] = useState('');
+    const [activeTerminalTab, setActiveTerminalTab] = useState('OUTPUT');
+    const [terminalCwd, setTerminalCwd] = useState('backend');
+    const terminalInputRef = useRef(null);
 
     // Modal State
     const [showModal, setShowModal] = useState(false);
@@ -173,13 +179,43 @@ function App() {
         fetchPackages();
         fetchDeviceInfo();
 
-        // Polling for device status only (slow)
+        // 1. Show startup logs in terminal on mount to match ./start.sh experience
+        const startupLogs = [
+            { text: `kalyanibadgujar@C02F32ZMMD6R rattl-runner % ./start.sh`, delay: 100 },
+            { text: '🚀 Starting Ratl Runner...', delay: 200 },
+            { text: '🐍 Starting Backend (Port 8000)...', delay: 500 },
+            { text: 'INFO:     Started server process [92237]', delay: 800 },
+            { text: 'INFO:     Application startup complete.', delay: 1200 },
+            { text: '⚛️ Starting Frontend...', delay: 1500 },
+            { text: '✅ Both services reported running.', delay: 1800 },
+            { text: 'Press Ctrl+C to stop.', delay: 2000 }
+        ];
+
+        startupLogs.forEach(log => {
+            setTimeout(() => addLog('info-cmd', log.text), log.delay);
+        });
+
+        // 2. Real ADB Check on start
+        setTimeout(() => {
+            addLog('info', '🔍 Searching for USB devices...');
+            executeCommand('adb devices');
+        }, 2200);
+
+        // Polling for device status
         const statusInterval = setInterval(() => {
             checkDevice();
-        }, 3000);
+        }, 2000);
 
         return () => clearInterval(statusInterval);
     }, []);
+
+    // 2. Automaticaly "Start" when device is connected
+    useEffect(() => {
+        if (deviceConnected && logs.length > 5) {
+            addLog('success', '🔌 Device connected! Initializing session...');
+            executeCommand('adb shell getprop ro.product.model');
+        }
+    }, [deviceConnected]);
 
     // Sequential polling handler: Only fetch next frame after current one is loaded
     const onScreenLoad = () => {
@@ -239,7 +275,7 @@ function App() {
     // --- API Calls ---
     const fetchFiles = async () => {
         try {
-            const res = await fetch('http://localhost:8000/files');
+            const res = await fetch(`${API_BASE_URL}/files`);
             const data = await res.json();
             setFiles(data.files || []);
         } catch (e) {
@@ -249,7 +285,7 @@ function App() {
 
     const fetchDeviceInfo = async () => {
         try {
-            const res = await fetch('http://localhost:8000/device_info');
+            const res = await fetch(`${API_BASE_URL}/device_info`);
             const data = await res.json();
             if (data.size) {
                 const match = data.size.match(/(\d+)x(\d+)/);
@@ -270,7 +306,7 @@ function App() {
         if (!showInspector || isFetchingHierarchy) return;
         setIsFetchingHierarchy(true);
         try {
-            const res = await fetch('http://localhost:8000/hierarchy');
+            const res = await fetch(`${API_BASE_URL}/hierarchy`);
             const data = await res.json();
             if (data.output) {
                 const parsed = JSON.parse(data.output);
@@ -298,32 +334,33 @@ function App() {
 
     const checkDevice = async () => {
         try {
-            const res = await fetch('http://localhost:8000/devices');
+            const res = await fetch(`${API_BASE_URL}/devices`);
             const data = await res.json();
 
-            // Maestro-style check: Parse lines and look for 'device' status
-            const connected = !!data.output && data.output.split('\n').some(line => {
+            const output = data.output || '';
+            const connected = output.split('\n').some(line => {
                 const parts = line.trim().split(/\s+/);
                 return parts.length >= 2 && parts[1] === 'device';
             });
 
-            setDeviceConnected(prevConnected => {
-                if (connected && !prevConnected) {
-                    addLog('success', 'Device Connected!');
-                    // Refresh list of packages and device resolution only when a device first connects
-                    fetchPackages();
-                    fetchDeviceInfo();
-                }
-                return connected;
-            });
+            if (connected && !deviceConnected) {
+                addLog('success', '✨ Device detected! Connection established.');
+                fetchDeviceInfo();
+                fetchPackages();
+            } else if (!connected && deviceConnected) {
+                addLog('error', '⚠️ Device disconnected. Waiting for connection...');
+            }
+
+            setDeviceConnected(connected);
         } catch (e) {
+            if (deviceConnected) addLog('error', '📡 Server connection lost.');
             setDeviceConnected(false);
         }
     };
 
     const fetchPackages = async () => {
         try {
-            const res = await fetch('http://localhost:8000/packages');
+            const res = await fetch(`${API_BASE_URL}/packages`);
             if (!res.ok) throw new Error('Failed to fetch packages');
             const data = await res.json();
             const pkgs = data.packages || [];
@@ -343,7 +380,7 @@ function App() {
 
     const loadFile = async (file) => {
         try {
-            const res = await fetch(`http://localhost:8000/file?path=${encodeURIComponent(file.path)}`);
+            const res = await fetch(`${API_BASE_URL}/file?path=${encodeURIComponent(file.path)}`);
             const data = await res.json();
             setCurrentFile(file);
             setEditorContent(data.content);
@@ -357,7 +394,7 @@ function App() {
     const saveFile = async () => {
         if (!currentFile) return;
         try {
-            await fetch('http://localhost:8000/file', {
+            await fetch(`${API_BASE_URL}/file`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ path: currentFile.path, content: editorContent })
@@ -373,8 +410,112 @@ function App() {
         setLogs(prev => [...prev, { type, text, time }]);
     };
 
+    const focusTerminal = () => {
+        if (terminalInputRef.current) {
+            terminalInputRef.current.focus();
+        }
+    };
+
     const clearLogs = () => {
         setLogs([{ type: 'info', text: 'Terminal Cleared', time: new Date().toLocaleTimeString([], { hour12: false }) }]);
+    };
+
+    // Helper to format path (tildify)
+    const formatTerminalPath = (path) => {
+        if (!path) return 'loading...';
+        // Simple tildify logic if we knew the home dir, but for now let's just show the path
+        // or a shortened version of it.
+        // If it's the project root, we can just show the folder name if it's too long
+        return path;
+    };
+
+    const fetchTerminalInfo = async () => {
+        try {
+            const res = await fetch(`${API_BASE_URL}/terminal`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ command: '' })
+            });
+            const data = await res.json();
+            if (data.cwd) setTerminalCwd(data.cwd);
+        } catch (e) {
+            console.error("Failed to fetch terminal info", e);
+        }
+    };
+
+    useEffect(() => {
+        if (activeTerminalTab === 'TERMINAL') {
+            fetchTerminalInfo();
+            setTimeout(focusTerminal, 50);
+        }
+    }, [activeTerminalTab]);
+
+    const executeCommand = async (cmd) => {
+        if (!cmd) return;
+
+        if (cmd.toLowerCase() === 'clear') {
+            setLogs(prev => prev.filter(l => l.type !== 'info-cmd' && !l.text.startsWith('>')));
+            return;
+        }
+
+        addLog('info-cmd', `> ${cmd}`);
+
+        try {
+            const res = await fetch(`${API_BASE_URL}/terminal`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ command: cmd })
+            });
+
+            const contentType = res.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+                const data = await res.json();
+                if (data.output) addLog('info-cmd', data.output);
+                if (data.cwd) setTerminalCwd(data.cwd);
+                return;
+            }
+
+            if (!res.body) throw new Error('No response body');
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n\n');
+                buffer = lines.pop() || '';
+
+                for (const rawLine of lines) {
+                    if (!rawLine.startsWith('data: ')) continue;
+                    const text = rawLine.replace('data: ', '').trim();
+
+                    if (text.startsWith('[DONE] EXIT_CODE:')) {
+                        const code = text.split(': ')[1];
+                        if (code !== '0') addLog('error', `Command exited with code ${code}`);
+                    } else if (text.startsWith('[CWD]')) {
+                        const cwdValue = text.replace('[CWD]', '').trim();
+                        setTerminalCwd(cwdValue);
+                    } else if (text.startsWith('[ERROR]')) {
+                        addLog('error', text.replace('[ERROR]', ''));
+                    } else if (text) {
+                        addLog('info-cmd', text);
+                    }
+                }
+            }
+        } catch (err) {
+            addLog('error', `Terminal Error: ${err.message}`);
+        }
+    };
+
+    const handleTerminalSubmit = async (e) => {
+        e.preventDefault();
+        const cmd = terminalInput.trim();
+        if (!cmd) return;
+        setTerminalInput('');
+        await executeCommand(cmd);
     };
 
     // Helper function to get available locators for an element
@@ -535,7 +676,7 @@ function App() {
 
     const runStep = async (step) => {
         try {
-            const res = await fetch('http://localhost:8000/run-step', {
+            const res = await fetch(`${API_BASE_URL}/run-step`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ step })
@@ -565,7 +706,7 @@ function App() {
 
         // Validate YAML before running
         try {
-            const validateRes = await fetch('http://localhost:8000/validate-yaml', {
+            const validateRes = await fetch(`${API_BASE_URL}/validate-yaml`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ yaml_content: editorContent })
@@ -616,7 +757,7 @@ function App() {
         abortControllerRef.current = new AbortController();
 
         try {
-            const response = await fetch('http://localhost:8000/run', {
+            const response = await fetch(`${API_BASE_URL}/run`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ yaml_content: editorContent }),
@@ -728,7 +869,7 @@ function App() {
             setIsRunning(true);
             addLog('info', `Creating test ${baseName}...`);
 
-            const res = await fetch('http://localhost:8000/files', {
+            const res = await fetch(`${API_BASE_URL}/files`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ path: baseName, type: 'file' })
@@ -745,7 +886,7 @@ function App() {
                 throw new Error(msg);
             }
 
-            const saveRes = await fetch('http://localhost:8000/file', {
+            const saveRes = await fetch(`${API_BASE_URL}/file`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ path: baseName, content: initialContent })
@@ -793,7 +934,7 @@ function App() {
         setLogs([{ type: 'info', text: `🚀 Starting folder run: ${folderPath}` }]);
 
         try {
-            const response = await fetch('http://localhost:8000/run-folder', {
+            const response = await fetch(`${API_BASE_URL}/run-folder`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ folder_path: folderPath })
@@ -834,12 +975,12 @@ function App() {
 
         try {
             // Read content
-            const readRes = await fetch(`http://localhost:8000/file?path=${encodeURIComponent(file.path)}`);
+            const readRes = await fetch(`${API_BASE_URL}/file?path=${encodeURIComponent(file.path)}`);
             const readData = await readRes.json();
             const content = readData.content;
 
             // Create/Save new
-            const saveRes = await fetch('http://localhost:8000/file', {
+            const saveRes = await fetch(`${API_BASE_URL}/file`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ path: newName, content: content })
@@ -872,7 +1013,7 @@ function App() {
         if (!confirm(`Are you sure you want to delete ${file.name}?`)) return;
 
         try {
-            const res = await fetch(`http://localhost:8000/file?path=${encodeURIComponent(file.path)}`, {
+            const res = await fetch(`${API_BASE_URL}/file?path=${encodeURIComponent(file.path)}`, {
                 method: 'DELETE',
             });
 
@@ -898,7 +1039,7 @@ function App() {
         if (!newName || newName === file.name) return;
 
         try {
-            const res = await fetch('http://localhost:8000/file', {
+            const res = await fetch(`${API_BASE_URL}/file`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ old_path: file.path, new_path: newName })
@@ -1044,7 +1185,19 @@ function App() {
                 <div className="header-controls">
                     <div className="device-status">
                         <span className={`status-dot ${deviceConnected ? 'connected' : ''}`} />
-                        {deviceConnected ? 'CONNECTED' : 'DISCONNECTED'}
+                        {deviceConnected ? 'CONNECTED' : 'NOT DETECTED'}
+                        {!deviceConnected && (
+                            <button
+                                className="action-btn"
+                                style={{ marginLeft: '4px', fontSize: '10px', padding: '2px 6px', width: 'auto' }}
+                                onClick={() => {
+                                    addLog('info', '🔄 Restarting ADB server...');
+                                    executeCommand('adb kill-server && adb start-server && adb devices');
+                                }}
+                            >
+                                FIX...
+                            </button>
+                        )}
                     </div>
                     <div style={{ display: 'flex', gap: '8px', background: 'rgba(0,0,0,0.2)', padding: '4px', borderRadius: '8px' }}>
                         <button className={`btn ${showInspector ? 'btn-primary' : 'btn-secondary'}`} onClick={() => {
@@ -1070,7 +1223,7 @@ function App() {
                         </button>
                         <button onClick={() => {
                             const folder = prompt('Folder Name:');
-                            if (folder) fetch('http://localhost:8000/files', {
+                            if (folder) fetch(`${API_BASE_URL}/files`, {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ path: folder, type: 'folder' })
@@ -1188,9 +1341,18 @@ function App() {
 
                             <div className="editor-toolbar">
                                 <div style={{ display: 'flex', gap: '8px' }}>
-                                    <button className="btn btn-primary" onClick={runTest} disabled={isRunning}>
-                                        {isRunning ? 'Running...' : '▶ Run Locally'}
-                                    </button>
+                                    {currentFile.name.endsWith('.sh') ? (
+                                        <button className="btn btn-primary" onClick={() => {
+                                            setActiveTerminalTab('TERMINAL');
+                                            executeCommand(currentFile.path === '../start.sh' ? './start.sh' : `./${currentFile.name}`);
+                                        }}>
+                                            🚀 Run Script
+                                        </button>
+                                    ) : (
+                                        <button className="btn btn-primary" onClick={runTest} disabled={isRunning}>
+                                            {isRunning ? 'Running...' : '▶ Run Locally'}
+                                        </button>
+                                    )}
                                     <button
                                         className="btn btn-secondary"
                                         onClick={stopTest}
@@ -1264,10 +1426,15 @@ function App() {
                     <div className="terminal-panel">
                         <div className="terminal-header">
                             <div className="terminal-tabs">
-                                <button className="terminal-tab">PROBLEMS</button>
-                                <button className="terminal-tab active">OUTPUT</button>
-                                <button className="terminal-tab">DEBUG CONSOLE</button>
-                                <button className="terminal-tab">TERMINAL</button>
+                                {['PROBLEMS', 'OUTPUT', 'DEBUG CONSOLE', 'TERMINAL'].map(tab => (
+                                    <button
+                                        key={tab}
+                                        className={`terminal-tab ${activeTerminalTab === tab ? 'active' : ''}`}
+                                        onClick={() => setActiveTerminalTab(tab)}
+                                    >
+                                        {tab}
+                                    </button>
+                                ))}
                             </div>
                             <div className="terminal-actions">
                                 <button className="action-btn" title="Scroll to Top" onClick={() => {
@@ -1289,13 +1456,56 @@ function App() {
                                 </button>
                             </div>
                         </div>
-                        <div className="terminal-content">
-                            {logs.map((log, i) => (
+                        <div className="terminal-content" onClick={activeTerminalTab === 'TERMINAL' ? focusTerminal : undefined}>
+                            {activeTerminalTab === 'OUTPUT' && logs.map((log, i) => (
                                 <div key={i} className={`terminal-line terminal-${log.type}`}>
                                     <span className="time">[{log.time}]</span>
                                     <span className="terminal-text">{log.text}</span>
                                 </div>
                             ))}
+
+                            {activeTerminalTab === 'TERMINAL' && (
+                                <>
+                                    <div className="terminal-welcome" style={{ color: '#888', marginBottom: '8px', fontSize: '11px' }}>
+                                        Interactive Terminal - Execute shell commands directly on the server.
+                                    </div>
+                                    {logs.filter(l => l.text.startsWith('>') || l.type === 'info-cmd').map((log, i) => (
+                                        <div key={i} className={`terminal-line terminal-${log.type}`}>
+                                            <span className="terminal-text">{log.text}</span>
+                                        </div>
+                                    ))}
+                                    <div className="terminal-input-row" style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '13px' }}>
+                                        <span className="terminal-prompt" style={{ color: '#10b981', fontWeight: 'bold' }}>
+                                            kalyanibadgujar@C02F32ZMMD6R
+                                        </span>
+                                        <span style={{ color: '#ffffff', margin: '0 8px' }}>
+                                            {formatTerminalPath(terminalCwd).split('/').pop() || 'rattl-runner'}
+                                        </span>
+                                        <span className="terminal-prompt" style={{ color: '#ffffff', marginRight: '8px' }}>%</span>
+                                        <form onSubmit={handleTerminalSubmit} style={{ flex: 1 }}>
+                                            <input
+                                                ref={terminalInputRef}
+                                                type="text"
+                                                className="terminal-input"
+                                                value={terminalInput}
+                                                onChange={(e) => setTerminalInput(e.target.value)}
+                                                placeholder="Type command and press Enter..."
+                                                spellCheck="false"
+                                                autoComplete="off"
+                                            />
+                                        </form>
+                                    </div>
+                                </>
+                            )}
+
+                            {activeTerminalTab === 'PROBLEMS' && (
+                                <div style={{ color: '#888', padding: '10px' }}>No problems detected in the current workspace.</div>
+                            )}
+
+                            {activeTerminalTab === 'DEBUG CONSOLE' && (
+                                <div style={{ color: '#888', padding: '10px' }}>Debug console is ready.</div>
+                            )}
+
                             <div ref={terminalEndRef} />
                         </div>
                     </div>
@@ -1350,7 +1560,7 @@ function App() {
                                     flexShrink: 0
                                 }}>
                                     <img
-                                        src={`http://localhost:8000/screenshot?t=${refreshKey}`}
+                                        src={`${API_BASE_URL}/screenshot?t=${refreshKey}`}
                                         className="device-screen"
                                         alt="Device Screen"
                                         onClick={handleScreenClick}

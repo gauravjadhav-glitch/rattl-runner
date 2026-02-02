@@ -1,0 +1,10 @@
+{
+    "framework": "vite",
+    "name": "ratl-runner-frontend",
+    "rewrites": [
+        {
+            "source": "/(.*)",
+            "destination": "/index.html"
+        }
+    ]
+}
