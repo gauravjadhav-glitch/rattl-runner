@@ -418,14 +418,26 @@ function App() {
 
     const updateBaseUrl = (newUrl) => {
         let formatted = newUrl.trim();
+
+        // Validation: Detect if user pasted the command instead of the URL
+        if (formatted.includes('ssh -R') || formatted.includes('pgy.in') && !formatted.includes('://')) {
+            if (!formatted.startsWith('http')) {
+                addLog('error', '❌ Invalid URL: You pasted the COMMAND. Please run it in Terminal and paste the LINK it gives you.');
+                alert('Wait! You pasted the command, not the URL. \n\n1. Run the command in your Mac terminal.\n2. Copy the https:// link it gives you.\n3. Paste THAT link here.');
+                return;
+            }
+        }
+
         if (formatted && !formatted.startsWith('http')) formatted = 'http://' + formatted;
         if (formatted.endsWith('/')) formatted = formatted.slice(0, -1);
 
         setApiBaseUrl(formatted);
         localStorage.setItem('ratl_api_url', formatted);
         setIsEditingUrl(false);
-        addLog('info', `Backend URL updated to: ${formatted}`);
+        addLog('info', `📡 Switching backend to: ${formatted}`);
+
         // Reset connection check
+        setDeviceConnected(false);
         setTimeout(checkDevice, 500);
     };
 
@@ -1571,15 +1583,60 @@ function App() {
                 <aside className={`device-pane ${showInspector ? 'inspector-active' : ''}`}>
 
                     {!deviceConnected ? (
-                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: '1rem', color: 'var(--text-secondary)' }}>
-                            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                                <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
-                                <line x1="12" y1="18" x2="12.01" y2="18"></line>
-                                <line x1="1" y1="1" x2="23" y2="23"></line>
-                            </svg>
-                            <div style={{ textAlign: 'center' }}>
-                                <div style={{ fontSize: '1rem', fontWeight: '600', color: 'var(--text-primary)', marginBottom: '0.5rem' }}>No Device Connected</div>
-                                <div style={{ fontSize: '0.85rem' }}>Connect a device or emulator to continue</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '2rem', color: 'var(--text-secondary)' }}>
+                            <div style={{ background: 'rgba(255,255,255,0.02)', padding: '2rem', borderRadius: '24px', border: '1px solid var(--border)', width: '100%', maxWidth: '400px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1.5rem', boxShadow: '0 20px 40px rgba(0,0,0,0.3)' }}>
+                                <div style={{ position: 'relative' }}>
+                                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#666" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                                        <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
+                                        <line x1="12" y1="18" x2="12.01" y2="18"></line>
+                                    </svg>
+                                    <div style={{ position: 'absolute', top: -5, right: -5, background: '#ff3b30', width: '20px', height: '20px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '2px solid var(--bg-secondary)' }}>
+                                        <span style={{ color: 'white', fontSize: '12px', fontWeight: 'bold' }}>!</span>
+                                    </div>
+                                </div>
+                                <div style={{ textAlign: 'center' }}>
+                                    <h3 style={{ fontSize: '1.1rem', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '0.4rem' }}>No Device Detected</h3>
+                                    <p style={{ fontSize: '0.8rem', lineHeight: '1.4' }}>Follow these steps to connect your phone to the cloud studio.</p>
+                                </div>
+
+                                <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                    <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
+                                        <div style={{ width: '24px', height: '24px', borderRadius: '50%', background: 'var(--accent)', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 'bold', flexShrink: 0 }}>1</div>
+                                        <div>
+                                            <div style={{ fontSize: '0.8rem', fontWeight: '600', color: '#fff' }}>Plug in USB</div>
+                                            <div style={{ fontSize: '0.7rem' }}>Enable USB Debugging on your phone.</div>
+                                        </div>
+                                    </div>
+
+                                    <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
+                                        <div style={{ width: '24px', height: '24px', borderRadius: '50%', background: 'var(--accent)', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 'bold', flexShrink: 0 }}>2</div>
+                                        <div style={{ flex: 1 }}>
+                                            <div style={{ fontSize: '0.8rem', fontWeight: '600', color: '#fff' }}>Start Local Bridge</div>
+                                            <div style={{ fontSize: '0.7rem', marginBottom: '6px' }}>Run this on your Mac:</div>
+                                            <code
+                                                style={{ display: 'block', padding: '6px 10px', background: '#000', borderRadius: '6px', fontSize: '10px', color: '#10b981', cursor: 'pointer', border: '1px solid #10b98133' }}
+                                                onClick={() => {
+                                                    navigator.clipboard.writeText('ssh -R 80:localhost:8000 pgy.in');
+                                                    addLog('success', 'Copied tunnel command to clipboard!');
+                                                }}
+                                                title="Click to copy"
+                                            >
+                                                ssh -R 80:localhost:8000 pgy.in
+                                            </code>
+                                        </div>
+                                    </div>
+
+                                    <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
+                                        <div style={{ width: '24px', height: '24px', borderRadius: '50%', background: 'var(--accent)', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 'bold', flexShrink: 0 }}>3</div>
+                                        <div>
+                                            <div style={{ fontSize: '0.8rem', fontWeight: '600', color: '#fff' }}>Paste Tunnel URL</div>
+                                            <div style={{ fontSize: '0.7rem' }}>Click "NOT DETECTED" above and paste the URL from Step 2.</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <button className="btn btn-primary" style={{ width: '100%', marginTop: '0.5rem' }} onClick={() => setIsEditingUrl(true)}>
+                                    Update Backend URL
+                                </button>
                             </div>
                         </div>
                     ) : (
