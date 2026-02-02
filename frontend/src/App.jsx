@@ -428,7 +428,7 @@ function App() {
         // 2. Validation: If it still looks like a command, reject it
         if (formatted.includes('ssh ') || formatted.includes('lt ') || formatted.includes('npm ')) {
             addLog('error', '❌ Invalid URL: You pasted the COMMAND. Please run the script on your Mac and paste the LINK it gives you.');
-            alert('Wait! You pasted the command, not the URL. \n\n1. Run the script "./rattl-bridge.sh" in your Mac terminal.\n2. Copy the https:// link it gives you.\n3. Paste THAT link here.');
+            alert('Wait! You pasted the command, not the URL. \n\n1. Run the bridge script (copy the command from the left).\n2. Copy the https:// link it gives you.\n3. Paste THAT link here.');
             return;
         }
 
@@ -1618,14 +1618,15 @@ function App() {
                                             <div style={{ fontSize: '0.8rem', fontWeight: '600', color: '#fff' }}>Start Local Bridge</div>
                                             <div style={{ fontSize: '0.7rem', marginBottom: '6px' }}>Run this on your Mac terminal:</div>
                                             <code
-                                                style={{ display: 'block', padding: '6px 10px', background: '#000', borderRadius: '6px', fontSize: '10px', color: '#10b981', cursor: 'pointer', border: '1px solid #10b98133' }}
+                                                style={{ display: 'block', padding: '6px 10px', background: '#000', borderRadius: '6px', fontSize: '10px', color: '#10b981', cursor: 'pointer', border: '1px solid #10b98133', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                                                 onClick={() => {
-                                                    navigator.clipboard.writeText('./rattl-bridge.sh');
+                                                    const cmd = `curl -sL ${window.location.origin}/install.sh | bash`;
+                                                    navigator.clipboard.writeText(cmd);
                                                     addLog('success', 'Copied script command to clipboard!');
                                                 }}
                                                 title="Click to copy"
                                             >
-                                                ./rattl-bridge.sh
+                                                curl -sL {window.location.host}/install.sh | bash
                                             </code>
                                         </div>
                                     </div>
