@@ -428,7 +428,7 @@ function App() {
         // 2. Validation: If it still looks like a command, reject it
         if (formatted.includes('ssh ') || formatted.includes('lt ') || formatted.includes('npm ')) {
             addLog('error', '❌ Invalid URL: You pasted the COMMAND. Please run the script on your Mac and paste the LINK it gives you.');
-            alert('Wait! You pasted the command, not the URL. \n\n1. Run the script "./maestro-bridge.sh" in your Mac terminal.\n2. Copy the https:// link it gives you.\n3. Paste THAT link here.');
+            alert('Wait! You pasted the command, not the URL. \n\n1. Run the script "./rattl-bridge.sh" in your Mac terminal.\n2. Copy the https:// link it gives you.\n3. Paste THAT link here.');
             return;
         }
 
@@ -1620,12 +1620,12 @@ function App() {
                                             <code
                                                 style={{ display: 'block', padding: '6px 10px', background: '#000', borderRadius: '6px', fontSize: '10px', color: '#10b981', cursor: 'pointer', border: '1px solid #10b98133' }}
                                                 onClick={() => {
-                                                    navigator.clipboard.writeText('./maestro-bridge.sh');
+                                                    navigator.clipboard.writeText('./rattl-bridge.sh');
                                                     addLog('success', 'Copied script command to clipboard!');
                                                 }}
                                                 title="Click to copy"
                                             >
-                                                ./maestro-bridge.sh
+                                                ./rattl-bridge.sh
                                             </code>
                                         </div>
                                     </div>
