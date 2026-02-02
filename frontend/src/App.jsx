@@ -525,7 +525,8 @@ function App() {
                 }
             }
         } catch (err) {
-            addLog('error', `Terminal Error: ${err.message}`);
+            console.error('Terminal Execution Error:', err);
+            addLog('error', `Terminal Error: ${err.message}. Make sure the backend at ${apiBaseUrl} is online.`);
         }
     };
 
