@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# --- Rattl Studio Ultimate Bridge ---
-# This script automates ADB, the Backend, and the Secure Tunnel.
+# --- Rattl Studio Ultimate Bridge (V2) ---
+# This version uses Cloudflare Tunnels (npx cloudflared) which 
+# is highly resistant to firewalls and "Connection Refused" errors.
 
 echo "🚀 Starting Rattl Studio Bridge..."
 
@@ -12,21 +13,16 @@ then
     exit 1
 fi
 
-# 2. Check for Node (needed for localtunnel)
-if ! command -v lt &> /dev/null
-then
-    echo "📦 Installing Localtunnel helper..."
-    npm install -g localtunnel
-fi
-
-# 3. Kill any existing backend on port 8000
+# 2. Kill any existing backend on port 8000
 echo "🧹 Clearing old processes..."
 lsof -ti:8000 | xargs kill -9 2>/dev/null
 
-# 4. Start Backend in background
-echo "🐍 Starting Backend..."
+# 3. Start Backend in background
+echo "🐍 Starting Backend on Port 8000..."
 cd backend
+# Ensure requirements are installed
 pip install -r requirements.txt > /dev/null 2>&1
+# Start the backend
 python3 main.py > backend.log 2>&1 &
 BACKEND_PID=$!
 cd ..
@@ -34,24 +30,22 @@ cd ..
 # Wait for backend to wake up
 sleep 2
 
-# 5. Start Tunnel
-echo "🌐 Creating Secure Bridge to Vercel..."
-# Generate a unique subdomain based on username to avoid conflicts
-USER_HASH=$(echo $USER | md5 | cut -c1-6)
-SUBDOMAIN="rattl-$USER_HASH"
+# 4. Start Tunnel using Cloudflare (No-install, Firewall-friendly)
+echo "🌐 Creating Secure Bridge via Cloudflare..."
+echo "--------------------------------------------------------"
+echo "✨ BRIDGE INITIALIZING..."
+echo "--------------------------------------------------------"
+echo "👉 STEPS:"
+echo "1. Wait for Cloudflare to give you an 'https://' link below."
+echo "2. Copy that link."
+echo "3. Open https://rattl-runner.vercel.app/"
+echo "4. Click 'NOT DETECTED' at the top and paste the link."
+echo "--------------------------------------------------------"
 
-echo "--------------------------------------------------------"
-echo "✨ BRIDGE ACTIVE!"
-echo "--------------------------------------------------------"
-echo "👉 COPY THIS URL:"
-lt --port 8000 --subdomain $SUBDOMAIN | grep -o "https://.*" 
-echo "--------------------------------------------------------"
-echo "1. Open https://rattl-runner.vercel.app/"
-echo "2. Click 'NOT DETECTED' at the top."
-echo "3. Paste the URL above."
-echo "--------------------------------------------------------"
-echo "Press Ctrl+C to stop the bridge."
+# Run cloudflared tunnel
+# It will output the URL to the terminal
+npx cloudflared tunnel --url http://localhost:8000
 
-# Keep it running
+# Cleanup on exit
 trap "kill $BACKEND_PID; exit" INT
 wait

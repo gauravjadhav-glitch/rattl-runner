@@ -1634,7 +1634,7 @@ function App() {
                                         <div style={{ width: '24px', height: '24px', borderRadius: '50%', background: 'var(--accent)', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 'bold', flexShrink: 0 }}>3</div>
                                         <div>
                                             <div style={{ fontSize: '0.8rem', fontWeight: '600', color: '#fff' }}>Paste Tunnel URL</div>
-                                            <div style={{ fontSize: '0.7rem' }}>Click "NOT DETECTED" above and paste the URL from Step 2.</div>
+                                            <div style={{ fontSize: '0.7rem' }}>Paste the <b>.trycloudflare.com</b> link from the terminal into the box above.</div>
                                         </div>
                                     </div>
                                 </div>
