@@ -61,7 +61,10 @@ const PlayIcon = () => (
     </svg>
 );
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || `${window.location.protocol}//${window.location.hostname}:8000`;
+// Default base URL logic: If on Vercel, point to Render. If local, point to local port 8000.
+const DEFAULT_API_URL = window.location.hostname.includes('vercel.app')
+    ? 'https://rattl-runner-lr6p.onrender.com'
+    : `${window.location.protocol}//${window.location.hostname === 'localhost' ? 'localhost' : window.location.hostname}:8000`;
 
 function App() {
     // --- State ---
@@ -89,6 +92,9 @@ function App() {
     const [terminalInput, setTerminalInput] = useState('');
     const [activeTerminalTab, setActiveTerminalTab] = useState('OUTPUT');
     const [terminalCwd, setTerminalCwd] = useState('backend');
+    const [apiBaseUrl, setApiBaseUrl] = useState(localStorage.getItem('ratl_api_url') || import.meta.env.VITE_API_URL || DEFAULT_API_URL);
+    const [isEditingUrl, setIsEditingUrl] = useState(false);
+    const [urlInput, setUrlInput] = useState(apiBaseUrl);
     const terminalInputRef = useRef(null);
 
     // Modal State
@@ -275,7 +281,7 @@ function App() {
     // --- API Calls ---
     const fetchFiles = async () => {
         try {
-            const res = await fetch(`${API_BASE_URL}/files`);
+            const res = await fetch(`${apiBaseUrl}/files`);
             const data = await res.json();
             setFiles(data.files || []);
         } catch (e) {
@@ -285,7 +291,7 @@ function App() {
 
     const fetchDeviceInfo = async () => {
         try {
-            const res = await fetch(`${API_BASE_URL}/device_info`);
+            const res = await fetch(`${apiBaseUrl}/device_info`);
             const data = await res.json();
             if (data.size) {
                 const match = data.size.match(/(\d+)x(\d+)/);
@@ -306,7 +312,7 @@ function App() {
         if (!showInspector || isFetchingHierarchy) return;
         setIsFetchingHierarchy(true);
         try {
-            const res = await fetch(`${API_BASE_URL}/hierarchy`);
+            const res = await fetch(`${apiBaseUrl}/hierarchy`);
             const data = await res.json();
             if (data.output) {
                 const parsed = JSON.parse(data.output);
@@ -334,7 +340,7 @@ function App() {
 
     const checkDevice = async () => {
         try {
-            const res = await fetch(`${API_BASE_URL}/devices`);
+            const res = await fetch(`${apiBaseUrl}/devices`);
             const data = await res.json();
 
             const output = data.output || '';
@@ -360,7 +366,7 @@ function App() {
 
     const fetchPackages = async () => {
         try {
-            const res = await fetch(`${API_BASE_URL}/packages`);
+            const res = await fetch(`${apiBaseUrl}/packages`);
             if (!res.ok) throw new Error('Failed to fetch packages');
             const data = await res.json();
             const pkgs = data.packages || [];
@@ -380,7 +386,7 @@ function App() {
 
     const loadFile = async (file) => {
         try {
-            const res = await fetch(`${API_BASE_URL}/file?path=${encodeURIComponent(file.path)}`);
+            const res = await fetch(`${apiBaseUrl}/file?path=${encodeURIComponent(file.path)}`);
             const data = await res.json();
             setCurrentFile(file);
             setEditorContent(data.content);
@@ -394,7 +400,7 @@ function App() {
     const saveFile = async () => {
         if (!currentFile) return;
         try {
-            await fetch(`${API_BASE_URL}/file`, {
+            await fetch(`${apiBaseUrl}/file`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ path: currentFile.path, content: editorContent })
@@ -408,6 +414,19 @@ function App() {
     const addLog = (type, text) => {
         const time = new Date().toLocaleTimeString([], { hour12: false });
         setLogs(prev => [...prev, { type, text, time }]);
+    };
+
+    const updateBaseUrl = (newUrl) => {
+        let formatted = newUrl.trim();
+        if (formatted && !formatted.startsWith('http')) formatted = 'http://' + formatted;
+        if (formatted.endsWith('/')) formatted = formatted.slice(0, -1);
+
+        setApiBaseUrl(formatted);
+        localStorage.setItem('ratl_api_url', formatted);
+        setIsEditingUrl(false);
+        addLog('info', `Backend URL updated to: ${formatted}`);
+        // Reset connection check
+        setTimeout(checkDevice, 500);
     };
 
     const focusTerminal = () => {
@@ -431,7 +450,7 @@ function App() {
 
     const fetchTerminalInfo = async () => {
         try {
-            const res = await fetch(`${API_BASE_URL}/terminal`, {
+            const res = await fetch(`${apiBaseUrl}/terminal`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ command: '' })
@@ -461,7 +480,7 @@ function App() {
         addLog('info-cmd', `> ${cmd}`);
 
         try {
-            const res = await fetch(`${API_BASE_URL}/terminal`, {
+            const res = await fetch(`${apiBaseUrl}/terminal`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ command: cmd })
@@ -676,7 +695,7 @@ function App() {
 
     const runStep = async (step) => {
         try {
-            const res = await fetch(`${API_BASE_URL}/run-step`, {
+            const res = await fetch(`${apiBaseUrl}/run-step`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ step })
@@ -706,7 +725,7 @@ function App() {
 
         // Validate YAML before running
         try {
-            const validateRes = await fetch(`${API_BASE_URL}/validate-yaml`, {
+            const validateRes = await fetch(`${apiBaseUrl}/validate-yaml`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ yaml_content: editorContent })
@@ -757,7 +776,7 @@ function App() {
         abortControllerRef.current = new AbortController();
 
         try {
-            const response = await fetch(`${API_BASE_URL}/run`, {
+            const response = await fetch(`${apiBaseUrl}/run`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ yaml_content: editorContent }),
@@ -869,7 +888,7 @@ function App() {
             setIsRunning(true);
             addLog('info', `Creating test ${baseName}...`);
 
-            const res = await fetch(`${API_BASE_URL}/files`, {
+            const res = await fetch(`${apiBaseUrl}/files`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ path: baseName, type: 'file' })
@@ -886,7 +905,7 @@ function App() {
                 throw new Error(msg);
             }
 
-            const saveRes = await fetch(`${API_BASE_URL}/file`, {
+            const saveRes = await fetch(`${apiBaseUrl}/file`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ path: baseName, content: initialContent })
@@ -934,7 +953,7 @@ function App() {
         setLogs([{ type: 'info', text: `🚀 Starting folder run: ${folderPath}` }]);
 
         try {
-            const response = await fetch(`${API_BASE_URL}/run-folder`, {
+            const response = await fetch(`${apiBaseUrl}/run-folder`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ folder_path: folderPath })
@@ -975,12 +994,12 @@ function App() {
 
         try {
             // Read content
-            const readRes = await fetch(`${API_BASE_URL}/file?path=${encodeURIComponent(file.path)}`);
+            const readRes = await fetch(`${apiBaseUrl}/file?path=${encodeURIComponent(file.path)}`);
             const readData = await readRes.json();
             const content = readData.content;
 
             // Create/Save new
-            const saveRes = await fetch(`${API_BASE_URL}/file`, {
+            const saveRes = await fetch(`${apiBaseUrl}/file`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ path: newName, content: content })
@@ -1013,7 +1032,7 @@ function App() {
         if (!confirm(`Are you sure you want to delete ${file.name}?`)) return;
 
         try {
-            const res = await fetch(`${API_BASE_URL}/file?path=${encodeURIComponent(file.path)}`, {
+            const res = await fetch(`${apiBaseUrl}/file?path=${encodeURIComponent(file.path)}`, {
                 method: 'DELETE',
             });
 
@@ -1039,7 +1058,7 @@ function App() {
         if (!newName || newName === file.name) return;
 
         try {
-            const res = await fetch(`${API_BASE_URL}/file`, {
+            const res = await fetch(`${apiBaseUrl}/file`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ old_path: file.path, new_path: newName })
@@ -1183,10 +1202,46 @@ function App() {
                     <h2 className="header-title">Ratl Studio</h2>
                 </div>
                 <div className="header-controls">
-                    <div className="device-status">
+                    <div className="device-status" style={{ position: 'relative' }}>
                         <span className={`status-dot ${deviceConnected ? 'connected' : ''}`} />
-                        {deviceConnected ? 'CONNECTED' : 'NOT DETECTED'}
-                        {!deviceConnected && (
+                        <span
+                            style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
+                            onClick={() => { setIsEditingUrl(!isEditingUrl); setUrlInput(apiBaseUrl); }}
+                            title="Click to Change Backend URL"
+                        >
+                            {deviceConnected ? 'CONNECTED' : 'NOT DETECTED'}
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                        </span>
+
+                        {isEditingUrl && (
+                            <div style={{
+                                position: 'absolute', top: '100%', right: 0, marginTop: '8px',
+                                background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
+                                padding: '12px', borderRadius: '8px', zIndex: 1000,
+                                width: '300px', boxShadow: '0 10px 25px rgba(0,0,0,0.5)'
+                            }}>
+                                <div style={{ fontSize: '10px', marginBottom: '8px', color: 'var(--text-secondary)' }}>BACKEND API URL (PGY.IN / NGROK)</div>
+                                <div style={{ display: 'flex', gap: '8px' }}>
+                                    <input
+                                        type="text"
+                                        value={urlInput}
+                                        onChange={(e) => setUrlInput(e.target.value)}
+                                        placeholder="https://..."
+                                        style={{ flex: 1, background: '#000', border: '1px solid var(--border)', color: '#fff', fontSize: '11px', padding: '4px 8px', borderRadius: '4px' }}
+                                    />
+                                    <button
+                                        className="btn btn-primary"
+                                        style={{ height: '24px', fontSize: '10px' }}
+                                        onClick={() => updateBaseUrl(urlInput)}
+                                    >Update</button>
+                                </div>
+                                <div style={{ fontSize: '9px', marginTop: '8px', color: '#ff3b30' }}>
+                                    Note: If using HTTPS (Vercel), your backend MUST also use HTTPS (like pgy.in tunnel).
+                                </div>
+                            </div>
+                        )}
+
+                        {!deviceConnected && !isEditingUrl && (
                             <button
                                 className="action-btn"
                                 style={{ marginLeft: '4px', fontSize: '10px', padding: '2px 6px', width: 'auto' }}
@@ -1223,7 +1278,7 @@ function App() {
                         </button>
                         <button onClick={() => {
                             const folder = prompt('Folder Name:');
-                            if (folder) fetch(`${API_BASE_URL}/files`, {
+                            if (folder) fetch(`${apiBaseUrl}/files`, {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ path: folder, type: 'folder' })
@@ -1560,7 +1615,7 @@ function App() {
                                     flexShrink: 0
                                 }}>
                                     <img
-                                        src={`${API_BASE_URL}/screenshot?t=${refreshKey}`}
+                                        src={`${apiBaseUrl}/screenshot?t=${refreshKey}`}
                                         className="device-screen"
                                         alt="Device Screen"
                                         onClick={handleScreenClick}
