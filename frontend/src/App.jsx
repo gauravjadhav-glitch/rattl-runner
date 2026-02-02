@@ -419,13 +419,17 @@ function App() {
     const updateBaseUrl = (newUrl) => {
         let formatted = newUrl.trim();
 
-        // Validation: Detect if user pasted the command instead of the URL
-        if (formatted.includes('ssh -R') || formatted.includes('pgy.in') && !formatted.includes('://')) {
-            if (!formatted.startsWith('http')) {
-                addLog('error', '❌ Invalid URL: You pasted the COMMAND. Please run it in Terminal and paste the LINK it gives you.');
-                alert('Wait! You pasted the command, not the URL. \n\n1. Run the command in your Mac terminal.\n2. Copy the https:// link it gives you.\n3. Paste THAT link here.');
-                return;
-            }
+        // 1. Smart Extraction: If they pasted a command like 'lt --port 8000', find the URL inside it
+        const urlMatch = formatted.match(/https?:\/\/[a-z0-9-.]+(?:\.[a-z]{2,})[^\s]*/i);
+        if (urlMatch) {
+            formatted = urlMatch[0];
+        }
+
+        // 2. Validation: If it still looks like a command, reject it
+        if (formatted.includes('ssh ') || formatted.includes('lt ') || formatted.includes('npm ')) {
+            addLog('error', '❌ Invalid URL: You pasted the COMMAND. Please run the script on your Mac and paste the LINK it gives you.');
+            alert('Wait! You pasted the command, not the URL. \n\n1. Run the script "./maestro-bridge.sh" in your Mac terminal.\n2. Copy the https:// link it gives you.\n3. Paste THAT link here.');
+            return;
         }
 
         if (formatted && !formatted.startsWith('http')) formatted = 'http://' + formatted;
@@ -1612,16 +1616,16 @@ function App() {
                                         <div style={{ width: '24px', height: '24px', borderRadius: '50%', background: 'var(--accent)', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 'bold', flexShrink: 0 }}>2</div>
                                         <div style={{ flex: 1 }}>
                                             <div style={{ fontSize: '0.8rem', fontWeight: '600', color: '#fff' }}>Start Local Bridge</div>
-                                            <div style={{ fontSize: '0.7rem', marginBottom: '6px' }}>Run this on your Mac:</div>
+                                            <div style={{ fontSize: '0.7rem', marginBottom: '6px' }}>Run this on your Mac terminal:</div>
                                             <code
                                                 style={{ display: 'block', padding: '6px 10px', background: '#000', borderRadius: '6px', fontSize: '10px', color: '#10b981', cursor: 'pointer', border: '1px solid #10b98133' }}
                                                 onClick={() => {
-                                                    navigator.clipboard.writeText('ssh -R 80:localhost:8000 pgy.in');
-                                                    addLog('success', 'Copied tunnel command to clipboard!');
+                                                    navigator.clipboard.writeText('./maestro-bridge.sh');
+                                                    addLog('success', 'Copied script command to clipboard!');
                                                 }}
                                                 title="Click to copy"
                                             >
-                                                ssh -R 80:localhost:8000 pgy.in
+                                                ./maestro-bridge.sh
                                             </code>
                                         </div>
                                     </div>
