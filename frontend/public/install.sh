@@ -27,6 +27,13 @@ if [ -d "$INSTALL_DIR" ]; then
     if [ -d ".git" ]; then
         git pull origin main || git pull origin master || echo "⚠️ Could not update via git. Continuing..."
     fi
+
+    # Fix for nested directories (e.g. ~/rattl-runner/rattl-runner)
+    if [ ! -f "rattl-bridge.sh" ] && [ -d "rattl-runner" ]; then
+        echo "📂 Detected nested project folder, entering..."
+        cd "rattl-runner"
+    fi
+
 else
     echo "⬇️ Downloading Rattl Runner..."
     # Check for git
@@ -38,6 +45,14 @@ else
     # Clone the repo
     git clone "$REPO_URL" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
+fi
+
+# Final check for the script
+if [ ! -f "rattl-bridge.sh" ]; then
+    echo "❌ Error: Could not find 'rattl-bridge.sh' in $(pwd)."
+    echo "If this persists, try deleting the '$INSTALL_DIR' folder and running this command again."
+    ls -F # Debug: List files to help user see what's wrong
+    exit 1
 fi
 
 # Ensure executable permissions
