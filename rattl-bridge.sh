@@ -42,6 +42,15 @@ fi
 
 # --- 3. Check/Download Cloudflared (Tunnel) ---
 CLOUDFLARED_BIN="$BIN_DIR/cloudflared"
+
+# Integrity Check: Remove if invalid
+if [ -f "$CLOUDFLARED_BIN" ]; then
+    if ! "$CLOUDFLARED_BIN" --version &> /dev/null; then
+        echo "⚠️  Corrupt Cloudflared binary detected. Re-downloading..."
+        rm "$CLOUDFLARED_BIN"
+    fi
+fi
+
 if [ ! -f "$CLOUDFLARED_BIN" ]; then
     echo "⬇️  Cloudflared not found. Downloading standalone binary..."
     
@@ -56,13 +65,14 @@ if [ ! -f "$CLOUDFLARED_BIN" ]; then
         URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
     fi
     
-    curl -sL -o "$CLOUDFLARED_BIN" "$URL"
-    chmod +x "$CLOUDFLARED_BIN"
-    
-    if [ -f "$CLOUDFLARED_BIN" ]; then
+    # Use -f to fail on 404 errors, -L to follow redirects
+    if curl -fL -o "$CLOUDFLARED_BIN" "$URL"; then
+        chmod +x "$CLOUDFLARED_BIN"
         echo "✅ Cloudflared installed locally."
     else
-        echo "❌ Failed to download Cloudflared."
+        echo "❌ Critical Error: Failed to download Cloudflared."
+        echo "   URL: $URL"
+        rm -f "$CLOUDFLARED_BIN"
         exit 1
     fi
 else
