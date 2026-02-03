@@ -54,7 +54,7 @@ ratl-runner/
 1. **Clone the repository**
 ```bash
 git clone <repository-url>
-cd maestro-runner/maestro-runner
+cd rattl-runner/rattl-runner
 ```
 
 2. **Install backend dependencies**
