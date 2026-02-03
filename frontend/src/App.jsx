@@ -1843,9 +1843,7 @@ function App() {
                                                     {
                                                         title: '👉 Tap & Click',
                                                         actions: [
-                                                            { label: 'Tap Element', yaml: formatYaml('tapOn', selector), cmd: 'tapOn' },
-                                                            { label: 'Double Tap', yaml: formatYaml('doubleTapOn', selector), cmd: 'doubleTapOn' },
-                                                            { label: 'Long Press', yaml: formatYaml('longPressOn', selector), cmd: 'longPressOn' }
+                                                            { label: 'Tap Element', yaml: formatYaml('tapOn', selector), cmd: 'tapOn' }
                                                         ]
                                                     },
                                                     {
@@ -1861,8 +1859,7 @@ function App() {
                                                         title: '📜 Scroll',
                                                         actions: [
                                                             { label: 'Scroll Down', yaml: `- scroll:\n    direction: DOWN`, cmd: 'scroll' },
-                                                            { label: 'Scroll Up', yaml: `- scroll:\n    direction: UP`, cmd: 'scroll' },
-                                                            { label: 'Scroll to Element', yaml: formatYaml('scrollUntilVisible', { element: selector, direction: 'DOWN' }), cmd: 'scrollUntilVisible' }
+                                                            { label: 'Scroll Up', yaml: `- scroll:\n    direction: UP`, cmd: 'scroll' }
                                                         ]
                                                     },
                                                     {
@@ -1870,9 +1867,7 @@ function App() {
                                                         actions: [
                                                             { label: 'Tap and Type', yaml: `${formatYaml('tapOn', selector)}\n- inputText: "your text"`, cmd: 'tapOn' },
                                                             { label: 'Input Text', yaml: `- inputText: "your text here"`, cmd: 'inputText' },
-                                                            { label: 'Erase Text', yaml: `- eraseText: 10`, cmd: 'eraseText' },
-                                                            { label: 'Press Enter', yaml: `- pressKey: Enter`, cmd: 'pressKey' },
-                                                            { label: 'Press Backspace', yaml: `- pressKey: Backspace`, cmd: 'pressKey' }
+                                                            { label: 'Press Enter', yaml: `- pressKey: Enter`, cmd: 'pressKey' }
                                                         ]
                                                     },
                                                     {
@@ -1887,24 +1882,14 @@ function App() {
                                                         title: '⏱️ Wait & Timing',
                                                         actions: [
                                                             { label: 'Wait for Visible', yaml: formatYaml('extendedWaitUntil', { visible: selector, timeout: 10000 }), cmd: 'extendedWaitUntil' },
-                                                            { label: 'Wait for Not Visible', yaml: formatYaml('extendedWaitUntil', { notVisible: selector, timeout: 10000 }), cmd: 'extendedWaitUntil' },
-                                                            { label: 'Wait 2 Seconds', yaml: `- wait: 2000`, cmd: 'wait' }
+                                                            { label: 'Wait for Not Visible', yaml: formatYaml('extendedWaitUntil', { notVisible: selector, timeout: 10000 }), cmd: 'extendedWaitUntil' }
                                                         ]
                                                     },
                                                     {
                                                         title: '🧭 Navigation',
                                                         actions: [
-                                                            { label: 'Go Back', yaml: `- back`, cmd: 'back' },
-                                                            { label: 'Hide Keyboard', yaml: `- hideKeyboard`, cmd: 'hideKeyboard' },
-                                                            { label: 'Open Link', yaml: `- openLink: "https://example.com"`, cmd: 'openLink' }
-                                                        ]
-                                                    },
-                                                    {
-                                                        title: '📸 Capture & Debug',
-                                                        actions: [
-                                                            { label: 'Take Screenshot', yaml: `- takeScreenshot: screenshot.png`, cmd: 'takeScreenshot' },
-                                                            { label: 'Start Recording', yaml: `- startRecording: video.mp4`, cmd: 'startRecording' },
-                                                            { label: 'Stop Recording', yaml: `- stopRecording`, cmd: 'stopRecording' }
+                                                            { label: 'Back Button', yaml: `- pressKey: Back`, cmd: 'pressKey' },
+                                                            { label: 'Home Button', yaml: `- pressKey: Home`, cmd: 'pressKey' }
                                                         ]
                                                     }
                                                 ];
