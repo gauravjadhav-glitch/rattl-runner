@@ -171,11 +171,7 @@ def list_files():
     try:
         files = []
         
-        # 1. Include start.sh from the root if it exists
-        root_dir = os.path.abspath(os.path.join(WORKSPACE_DIR, ".."))
-        start_sh = os.path.join(root_dir, "start.sh")
-        if os.path.exists(start_sh):
-            files.append({"name": "start.sh", "path": "../start.sh"})
+        # 1. Include YAML files and folders from WORKSPACE_DIR
             
         # 2. Include YAML files and folders from WORKSPACE_DIR
         for root, dirs, filenames in os.walk(WORKSPACE_DIR):
