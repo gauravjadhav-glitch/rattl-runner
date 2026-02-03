@@ -7,6 +7,7 @@
 echo "🚀 Starting Rattl Studio Bridge..."
 
 # 1. Dependency Check & Auto-Install
+# 1. Dependency Check & Auto-Install
 check_install() {
     CMD=$1
     PKG=$2
@@ -14,20 +15,38 @@ check_install() {
     
     if ! command -v $CMD &> /dev/null; then
         echo "⚠️  $NAME not found."
+        
+        # Try to find brew manually if not in path
+        if ! command -v brew &> /dev/null; then
+            if [ -f "/opt/homebrew/bin/brew" ]; then
+                eval "$(/opt/homebrew/bin/brew shellenv)"
+            elif [ -f "/usr/local/bin/brew" ]; then
+                eval "$(/usr/local/bin/brew shellenv)"
+            fi
+        fi
+
         if [[ "$OSTYPE" == "darwin"* ]]; then
-             echo "🍏 MacOS detected. Checking for Homebrew..."
+             echo "🍏 MacOS detected. Attempting to install via Homebrew..."
+             
              if ! command -v brew &> /dev/null; then
-                 echo "❌ Homebrew not found. Installing Homebrew..."
-                 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-                 
-                 # Add brew to path for this session if it was just installed
-                 eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)"
+                 echo "❌ Homebrew not found in standard paths." 
+                 echo "👉 Please run this command manually first to install Homebrew:"
+                 echo '   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+                 exit 1
              fi
              
              echo "📦 Installing $NAME..."
              brew install $PKG
+             
+             # Re-check
+             if ! command -v $CMD &> /dev/null; then
+                 echo "❌ installation of $NAME failed."
+                 echo "👉 Please install it manually: brew install $PKG"
+                 exit 1
+             fi
         else
-             echo "❌ Automatic install failed. Please install $NAME manually."
+             echo "❌ Automatic install failed."
+             echo "👉 Please install $NAME manually."
              exit 1
         fi
     fi
