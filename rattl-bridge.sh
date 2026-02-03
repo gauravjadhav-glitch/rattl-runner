@@ -1,96 +1,111 @@
 #!/bin/bash
 
-# --- Rattl Studio Ultimate Bridge (V2) ---
-# This version uses Cloudflare Tunnels (npx cloudflared) which 
-# is highly resistant to firewalls and "Connection Refused" errors.
+# --- Rattl Studio Ultimate Bridge (Portable) ---
+# Zero-dependency version: Downloads binaries locally. No Homebrew/Node/Sudo required.
 
-echo "🚀 Starting Rattl Studio Bridge..."
+echo "🚀 Initializing Rattl Studio Bridge (Portable)..."
 
-# 1. Dependency Check & Auto-Install
-# 1. Dependency Check & Auto-Install
-check_install() {
-    CMD=$1
-    PKG=$2
-    NAME=$3
-    
-    if ! command -v $CMD &> /dev/null; then
-        echo "⚠️  $NAME not found."
-        
-        # Try to find brew manually if not in path
-        if ! command -v brew &> /dev/null; then
-            if [ -f "/opt/homebrew/bin/brew" ]; then
-                eval "$(/opt/homebrew/bin/brew shellenv)"
-            elif [ -f "/usr/local/bin/brew" ]; then
-                eval "$(/usr/local/bin/brew shellenv)"
-            fi
-        fi
+# --- 1. Environment Setup ---
+WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+BIN_DIR="$WORKDIR/.bin"
+mkdir -p "$BIN_DIR"
+export PATH="$BIN_DIR:$PATH"
+export PATH="$BIN_DIR/platform-tools:$PATH"
 
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-             echo "🍏 MacOS detected. Attempting to install via Homebrew..."
-             
-             if ! command -v brew &> /dev/null; then
-                 echo "❌ Homebrew not found in standard paths." 
-                 echo "👉 Please run this command manually first to install Homebrew:"
-                 echo '   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
-                 exit 1
-             fi
-             
-             echo "📦 Installing $NAME..."
-             brew install $PKG
-             
-             # Re-check
-             if ! command -v $CMD &> /dev/null; then
-                 echo "❌ installation of $NAME failed."
-                 echo "👉 Please install it manually: brew install $PKG"
-                 exit 1
-             fi
-        else
-             echo "❌ Automatic install failed."
-             echo "👉 Please install $NAME manually."
-             exit 1
-        fi
+OS_TYPE=$(uname -s)
+ARCH_TYPE=$(uname -m)
+
+echo "ℹ️  System: $OS_TYPE ($ARCH_TYPE)"
+
+# --- 2. Check/Download ADB ---
+if ! command -v adb &> /dev/null; then
+    echo "⬇️  ADB not found. Downloading standalone version..."
+    if [[ "$OS_TYPE" == "Darwin" ]]; then
+        curl -sL -o "$BIN_DIR/platform-tools.zip" "https://dl.google.com/android/repository/platform-tools-latest-darwin.zip"
+    else
+        curl -sL -o "$BIN_DIR/platform-tools.zip" "https://dl.google.com/android/repository/platform-tools-latest-linux.zip"
     fi
-}
+    
+    # Unzip quietly
+    unzip -q "$BIN_DIR/platform-tools.zip" -d "$BIN_DIR"
+    rm "$BIN_DIR/platform-tools.zip"
+    
+    if [ -f "$BIN_DIR/platform-tools/adb" ]; then
+        echo "✅ ADB installed locally."
+    else
+        echo "❌ Failed to install ADB. Please install manually."
+        exit 1
+    fi
+else
+    echo "✅ ADB detected."
+fi
 
-# Check for ADB
-check_install "adb" "android-platform-tools" "Android Platform Tools"
+# --- 3. Check/Download Cloudflared (Tunnel) ---
+CLOUDFLARED_BIN="$BIN_DIR/cloudflared"
+if [ ! -f "$CLOUDFLARED_BIN" ]; then
+    echo "⬇️  Cloudflared not found. Downloading standalone binary..."
+    
+    URL=""
+    if [[ "$OS_TYPE" == "Darwin" ]]; then
+        if [[ "$ARCH_TYPE" == "arm64" ]]; then
+            URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64"
+        else
+            URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64"
+        fi
+    else
+        URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+    fi
+    
+    curl -sL -o "$CLOUDFLARED_BIN" "$URL"
+    chmod +x "$CLOUDFLARED_BIN"
+    
+    if [ -f "$CLOUDFLARED_BIN" ]; then
+        echo "✅ Cloudflared installed locally."
+    else
+        echo "❌ Failed to download Cloudflared."
+        exit 1
+    fi
+else
+    echo "✅ Cloudflared detected."
+fi
 
-# Check for Node/NPX (Required for Cloudflare Tunnel)
-check_install "npx" "node" "Node.js"
+# --- 4. Setup Python Environment ---
+echo "� Setting up Python environment..."
+cd "$WORKDIR/backend"
+if [ ! -d "venv" ]; then
+    python3 -m venv venv
+fi
+source venv/bin/activate
+pip install -r requirements.txt > /dev/null 2>&1
 
-# 2. Kill any existing backend on port 8000
+# --- 5. Execution ---
+
+# Kill old processes
 echo "🧹 Clearing old processes..."
 lsof -ti:8000 | xargs kill -9 2>/dev/null
 
-# 3. Start Backend in background
-echo "🐍 Starting Backend on Port 8000..."
-cd backend
-# Ensure requirements are installed
-pip install -r requirements.txt > /dev/null 2>&1
-# Start the backend
+# Start Backend
+echo "� Starting Backend..."
 python3 main.py > backend.log 2>&1 &
 BACKEND_PID=$!
 cd ..
 
-# Wait for backend to wake up
+# Wait for backend
 sleep 2
 
-# 4. Start Tunnel using Cloudflare (No-install, Firewall-friendly)
-echo "🌐 Creating Secure Bridge via Cloudflare..."
+# Start Tunnel
 echo "--------------------------------------------------------"
-echo "✨ BRIDGE INITIALIZING..."
+echo "✨ BRIDGE READY"
 echo "--------------------------------------------------------"
 echo "👉 STEPS:"
-echo "1. Wait for Cloudflare to give you an 'https://' link below."
-echo "2. Copy that link."
-echo "3. Open https://rattl-runner.vercel.app/"
-echo "4. Click 'NOT DETECTED' at the top and paste the link."
+echo "1. Wait for the 'https://' link below."
+echo "2. Copy it."
+echo "3. Go to https://rattl-runner.vercel.app/"
+echo "4. Click 'NOT DETECTED' -> Paste Link -> Update."
 echo "--------------------------------------------------------"
 
-# Run cloudflared tunnel
-# It will output the URL to the terminal
-npx cloudflared tunnel --url http://localhost:8000
+"$CLOUDFLARED_BIN" tunnel --url http://localhost:8000
 
-# Cleanup on exit
+# Cleanup
 trap "kill $BACKEND_PID; exit" INT
 wait
