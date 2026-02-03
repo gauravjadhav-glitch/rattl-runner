@@ -206,14 +206,15 @@ function App() {
             addLog('info', '🔍 Searching for USB devices...');
             executeCommand('adb devices');
         }, 2200);
-
-        // Polling for device status
-        const statusInterval = setInterval(() => {
-            checkDevice();
-        }, 2000);
-
-        return () => clearInterval(statusInterval);
     }, []);
+
+    // Polling for device status - Restarts when URL changes
+    useEffect(() => {
+        // Run immediately on URL change or mount
+        checkDevice();
+        const statusInterval = setInterval(checkDevice, 2000);
+        return () => clearInterval(statusInterval);
+    }, [apiBaseUrl]);
 
     // 2. Automaticaly "Start" when device is connected
     useEffect(() => {
@@ -442,7 +443,6 @@ function App() {
 
         // Reset connection check
         setDeviceConnected(false);
-        setTimeout(checkDevice, 500);
     };
 
     const focusTerminal = () => {
@@ -1247,6 +1247,7 @@ function App() {
                                         style={{ flex: 1, background: '#000', border: '1px solid var(--border)', color: '#fff', fontSize: '11px', padding: '4px 8px', borderRadius: '4px' }}
                                     />
                                     <button
+                                        type="button"
                                         className="btn btn-primary"
                                         style={{ height: '24px', fontSize: '10px' }}
                                         onClick={() => updateBaseUrl(urlInput)}
@@ -1616,7 +1617,7 @@ function App() {
                                         <div style={{ width: '24px', height: '24px', borderRadius: '50%', background: 'var(--accent)', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 'bold', flexShrink: 0 }}>2</div>
                                         <div style={{ flex: 1 }}>
                                             <div style={{ fontSize: '0.8rem', fontWeight: '600', color: '#fff' }}>Start Local Bridge</div>
-                                            <div style={{ fontSize: '0.7rem', marginBottom: '6px' }}>Run this on your Mac terminal:</div>
+                                            <div style={{ fontSize: '0.7rem', marginBottom: '6px' }}>Run this in Terminal (Mac/Linux) or Git Bash (Windows):</div>
                                             <code
                                                 style={{ display: 'block', padding: '6px 10px', background: '#000', borderRadius: '6px', fontSize: '10px', color: '#10b981', cursor: 'pointer', border: '1px solid #10b98133', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                                                 onClick={() => {
@@ -1633,15 +1634,31 @@ function App() {
 
                                     <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
                                         <div style={{ width: '24px', height: '24px', borderRadius: '50%', background: 'var(--accent)', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 'bold', flexShrink: 0 }}>3</div>
-                                        <div>
+                                        <div style={{ width: '100%' }}>
                                             <div style={{ fontSize: '0.8rem', fontWeight: '600', color: '#fff' }}>Paste Tunnel URL</div>
-                                            <div style={{ fontSize: '0.7rem' }}>Paste the <b>.trycloudflare.com</b> link from the terminal into the box above.</div>
+                                            <div style={{ fontSize: '0.7rem', marginBottom: '8px' }}>Paste the <b>.trycloudflare.com</b> link from the terminal below:</div>
+                                            <div style={{ display: 'flex', gap: '8px', width: '100%' }}>
+                                                <input
+                                                    type="text"
+                                                    value={urlInput}
+                                                    onChange={(e) => setUrlInput(e.target.value)}
+                                                    placeholder="https://..."
+                                                    style={{ flex: 1, background: 'rgba(0,0,0,0.3)', border: '1px solid var(--border)', color: '#fff', fontSize: '12px', padding: '8px', borderRadius: '6px' }}
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === 'Enter') updateBaseUrl(urlInput);
+                                                    }}
+                                                />
+                                                <button
+                                                    type="button"
+                                                    className="btn btn-primary"
+                                                    onClick={() => updateBaseUrl(urlInput)}
+                                                >
+                                                    Connect
+                                                </button>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
-                                <button className="btn btn-primary" style={{ width: '100%', marginTop: '0.5rem' }} onClick={() => setIsEditingUrl(true)}>
-                                    Update Backend URL
-                                </button>
                             </div>
                         </div>
                     ) : (
