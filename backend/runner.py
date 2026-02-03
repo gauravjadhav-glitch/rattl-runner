@@ -305,6 +305,49 @@ def run_test_step(step):
         run_adb(f"shell input keyevent {code}")
         return f"Key: {key}"
 
+    elif s.type == "scroll":
+        direction = "DOWN"
+        if isinstance(s.params, dict):
+            direction = s.params.get("direction", "DOWN")
+        
+        w, h = get_screen_size()
+        cx = w // 2
+        
+        # Scroll DOWN means content moves up, so we swipe UP (Bottom -> Top)
+        if direction == "DOWN":
+            start_y = int(h * 0.7)
+            end_y = int(h * 0.3)
+            run_adb(f"shell input swipe {cx} {start_y} {cx} {end_y} 1000")
+        # Scroll UP means content moves down, so we swipe DOWN (Top -> Bottom)
+        elif direction == "UP":
+            start_y = int(h * 0.3)
+            end_y = int(h * 0.7)
+            run_adb(f"shell input swipe {cx} {start_y} {cx} {end_y} 1000")
+            
+        return f"Scroll {direction}"
+
+    elif s.type == "swipe":
+        direction = None
+        if isinstance(s.params, dict):
+            direction = s.params.get("direction")
+        
+        if direction:
+             w, h = get_screen_size()
+             cx = w // 2
+             cy = h // 2
+             
+             if direction == "LEFT":
+                 run_adb(f"shell input swipe {int(w*0.8)} {cy} {int(w*0.2)} {cy} 500")
+             elif direction == "RIGHT":
+                 run_adb(f"shell input swipe {int(w*0.2)} {cy} {int(w*0.8)} {cy} 500")
+             elif direction == "DOWN":
+                 run_adb(f"shell input swipe {cx} {int(h*0.2)} {cx} {int(h*0.8)} 500")
+             elif direction == "UP":
+                 run_adb(f"shell input swipe {cx} {int(h*0.8)} {cx} {int(h*0.2)} 500")
+             return f"Swipe {direction}"
+        
+        return "Swipe (Custom coordinates not implemented)"
+
     elif s.type == "waitForAnimationToEnd":
         time.sleep(2)
         return "Wait animation"

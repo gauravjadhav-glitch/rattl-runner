@@ -1,19 +1,13 @@
 appId: com.hamleys_webapp
 ---
 - launchApp:
-    clearState: true
+    clearState: false
 - waitForAnimationToEnd
-# 6. Tap Element
-- tapOn:
-    point: 49%,56%
 - tapOn: Search
 - inputText: "toys"
 - pressKey: Enter
-- tapOn:
-    point: "35%,53%"
-# 8. Tap Element
-- tapOn: "Filter Toys +"
-# 9. Take Screenshot
-- takeScreenshot: screenshot.png
-# 10. Take Screenshot
-- takeScreenshot: screenshot.png
+- tapOn: "Add "
+- tapOn: "view bag"
+- swipe:
+    direction: DOWN
+
