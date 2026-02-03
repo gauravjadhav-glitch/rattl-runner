@@ -187,7 +187,7 @@ function App() {
 
         // 1. Show startup logs in terminal on mount to match ./start.sh experience
         const startupLogs = [
-            { text: `kalyanibadgujar@C02F32ZMMD6R rattl-runner % ./start.sh`, delay: 100 },
+            { text: `kalyanibadgujar@rattl-runner rattl-runner % ./start.sh`, delay: 100 },
             { text: '🚀 Starting Ratl Runner...', delay: 200 },
             { text: '🐍 Starting Backend (Port 8000)...', delay: 500 },
             { text: 'INFO:     Started server process [92237]', delay: 800 },
@@ -1548,7 +1548,7 @@ function App() {
                                     ))}
                                     <div className="terminal-input-row" style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '13px' }}>
                                         <span className="terminal-prompt" style={{ color: '#10b981', fontWeight: 'bold' }}>
-                                            kalyanibadgujar@C02F32ZMMD6R
+                                            kalyanibadgujar@rattl-runner
                                         </span>
                                         <span style={{ color: '#ffffff', margin: '0 8px' }}>
                                             {formatTerminalPath(terminalCwd).split('/').pop() || 'rattl-runner'}
