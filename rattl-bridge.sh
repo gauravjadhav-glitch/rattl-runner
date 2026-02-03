@@ -55,25 +55,42 @@ if [ ! -f "$CLOUDFLARED_BIN" ]; then
     echo "⬇️  Cloudflared not found. Downloading standalone binary..."
     
     URL=""
+    IS_TGZ=false
+    
     if [[ "$OS_TYPE" == "Darwin" ]]; then
+        IS_TGZ=true
         if [[ "$ARCH_TYPE" == "arm64" ]]; then
-            URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64"
+            URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz"
         else
-            URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64"
+            URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.tgz"
         fi
     else
+        # Linux usually provides a direct binary
         URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
     fi
     
     # Use -f to fail on 404 errors, -L to follow redirects
-    if curl -fL -o "$CLOUDFLARED_BIN" "$URL"; then
-        chmod +x "$CLOUDFLARED_BIN"
-        echo "✅ Cloudflared installed locally."
+    if [ "$IS_TGZ" = true ]; then
+        if curl -fL -o "$BIN_DIR/cloudflared.tgz" "$URL"; then
+             tar -xzf "$BIN_DIR/cloudflared.tgz" -C "$BIN_DIR"
+             rm "$BIN_DIR/cloudflared.tgz"
+             chmod +x "$CLOUDFLARED_BIN"
+             echo "✅ Cloudflared installed locally."
+        else
+             echo "❌ Critical Error: Failed to download Cloudflared archive."
+             echo "   URL: $URL"
+             exit 1
+        fi
     else
-        echo "❌ Critical Error: Failed to download Cloudflared."
-        echo "   URL: $URL"
-        rm -f "$CLOUDFLARED_BIN"
-        exit 1
+        if curl -fL -o "$CLOUDFLARED_BIN" "$URL"; then
+            chmod +x "$CLOUDFLARED_BIN"
+            echo "✅ Cloudflared installed locally."
+        else
+            echo "❌ Critical Error: Failed to download Cloudflared binary."
+            echo "   URL: $URL"
+            rm -f "$CLOUDFLARED_BIN"
+            exit 1
+        fi
     fi
 else
     echo "✅ Cloudflared detected."
