@@ -6,12 +6,38 @@
 
 echo "🚀 Starting Rattl Studio Bridge..."
 
-# 1. Check for ADB
-if ! command -v adb &> /dev/null
-then
-    echo "❌ ADB not found. Please install Android Platform Tools."
-    exit 1
-fi
+# 1. Dependency Check & Auto-Install
+check_install() {
+    CMD=$1
+    PKG=$2
+    NAME=$3
+    
+    if ! command -v $CMD &> /dev/null; then
+        echo "⚠️  $NAME not found."
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+             echo "🍏 MacOS detected. Checking for Homebrew..."
+             if ! command -v brew &> /dev/null; then
+                 echo "❌ Homebrew not found. Installing Homebrew..."
+                 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+                 
+                 # Add brew to path for this session if it was just installed
+                 eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)"
+             fi
+             
+             echo "📦 Installing $NAME..."
+             brew install $PKG
+        else
+             echo "❌ Automatic install failed. Please install $NAME manually."
+             exit 1
+        fi
+    fi
+}
+
+# Check for ADB
+check_install "adb" "android-platform-tools" "Android Platform Tools"
+
+# Check for Node/NPX (Required for Cloudflare Tunnel)
+check_install "npx" "node" "Node.js"
 
 # 2. Kill any existing backend on port 8000
 echo "🧹 Clearing old processes..."
