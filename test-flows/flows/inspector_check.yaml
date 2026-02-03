@@ -1,0 +1,13 @@
+appId: com.hamleys_webapp
+---
+- launchApp:
+    clearState: false
+- tapOn: Search
+- inputText: "Action Figures"
+- pressKey: Enter
+- assertVisible: "Action Figures"
+- scroll:
+    direction: DOWN
+- tapOn: 
+    text: "Back"
+    optional: true
