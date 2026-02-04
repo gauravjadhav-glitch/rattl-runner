@@ -102,8 +102,11 @@ cd "$WORKDIR/backend"
 if [ ! -d "venv" ]; then
     python3 -m venv venv
 fi
-source venv/bin/activate
-pip install -r requirements.txt > /dev/null 2>&1
+# Avoid 'source' issues by using direct path
+if ! ./venv/bin/pip install -r requirements.txt; then
+    echo "❌ Failed to install Python dependencies."
+    exit 1
+fi
 
 # --- 5. Execution ---
 
@@ -115,7 +118,8 @@ lsof -ti:8000 | xargs kill -9 2>/dev/null
 echo "🐍 Starting Backend..."
 # Use unbuffered output for Python to see logs immediately
 export PYTHONUNBUFFERED=1
-python3 main.py > backend.log 2>&1 &
+# Use venv python explicitly
+./venv/bin/python3 main.py > backend.log 2>&1 &
 BACKEND_PID=$!
 cd ..
 
