@@ -18,6 +18,17 @@ def tap_point(x, y):
 
 def get_screen_size():
     res = run_adb("shell wm size").stdout
+    # Prioritize Override size (user custom resolution)
+    match = re.search(r"Override size:\s*(\d+)x(\d+)", res)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    
+    # Fallback to Physical size
+    match = re.search(r"Physical size:\s*(\d+)x(\d+)", res)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+        
+    # Last resort fallback
     match = re.search(r"(\d+)x(\d+)", res)
     if match:
         return int(match.group(1)), int(match.group(2))

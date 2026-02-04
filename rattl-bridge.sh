@@ -112,13 +112,41 @@ echo "🧹 Clearing old processes..."
 lsof -ti:8000 | xargs kill -9 2>/dev/null
 
 # Start Backend
-echo "� Starting Backend..."
+echo "🐍 Starting Backend..."
+# Use unbuffered output for Python to see logs immediately
+export PYTHONUNBUFFERED=1
 python3 main.py > backend.log 2>&1 &
 BACKEND_PID=$!
 cd ..
 
-# Wait for backend
-sleep 2
+# Wait for backend to be ready
+echo "⏳ Waiting for backend to initialize..."
+MAX_RETRIES=10
+RETRIES=0
+BACKEND_READY=false
+
+while [ $RETRIES -lt $MAX_RETRIES ]; do
+    if lsof -i:8000 -t >/dev/null 2>&1 || curl -s http://127.0.0.1:8000/docs >/dev/null 2>&1; then
+        BACKEND_READY=true
+        break
+    fi
+    # Check if process died
+    if ! kill -0 $BACKEND_PID 2>/dev/null; then
+        echo "❌ Backend process died unexpectedly!"
+        break
+    fi
+    sleep 1
+    RETRIES=$((RETRIES+1))
+done
+
+if [ "$BACKEND_READY" = false ]; then
+    echo "❌ Error: Backend failed to start on port 8000."
+    echo "--- 📜 ID: backend.log (Last 20 lines) ---"
+    tail -n 20 backend/backend.log
+    echo "------------------------------------------"
+    kill $BACKEND_PID 2>/dev/null
+    exit 1
+fi
 
 # Start Tunnel
 echo "--------------------------------------------------------"
@@ -128,10 +156,11 @@ echo "👉 STEPS:"
 echo "1. Wait for the 'https://' link below."
 echo "2. Copy it."
 echo "3. Go to https://rattl-runner.vercel.app/"
-echo "4. Click 'NOT DETECTED' -> Paste Link -> Update."
+echo "4. Click 'NOT DETECTED' -> Paste Link -> Connect."
 echo "--------------------------------------------------------"
 
-"$CLOUDFLARED_BIN" tunnel --url http://localhost:8000
+# Use explicit 127.0.0.1 to avoid IPv6 ::1 connection refused errors
+"$CLOUDFLARED_BIN" tunnel --url http://127.0.0.1:8000
 
 # Cleanup
 trap "kill $BACKEND_PID; exit" INT

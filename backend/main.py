@@ -303,8 +303,22 @@ def get_device_info():
         # Get device model
         model_proc = subprocess.run(["adb", "shell", "getprop", "ro.product.model"], capture_output=True, text=True)
         
+        # Parse resolution smartly
+        res_out = res_proc.stdout.strip()
+        import re
+        size_val = res_out
+        
+        # Check Override first
+        m_over = re.search(r"Override size:\s*(\d+x\d+)", res_out)
+        if m_over:
+            size_val = m_over.group(1)
+        else:
+             m_phys = re.search(r"Physical size:\s*(\d+x\d+)", res_out)
+             if m_phys:
+                 size_val = m_phys.group(1)
+        
         return {
-            "size": res_proc.stdout.strip(),
+            "size": size_val,
             "density": den_proc.stdout.strip(),
             "model": model_proc.stdout.strip()
         }

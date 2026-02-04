@@ -571,6 +571,32 @@ function App() {
                 syntax: `"${textValue}"`
             });
         }
+        // 1b. Child Text Content (if parent has no text)
+        else if (element.children && element.children.length > 0) {
+            // DFS to find first text node in children
+            const findTextInChildren = (node) => {
+                const t = (node.text || node.attributes?.text || '').trim();
+                if (t) return t;
+                if (node.children) {
+                    for (const child of node.children) {
+                        const found = findTextInChildren(child);
+                        if (found) return found;
+                    }
+                }
+                return null;
+            };
+            const childText = findTextInChildren(element);
+            if (childText) {
+                locators.push({
+                    type: 'Text',
+                    label: 'Child Text',
+                    value: childText,
+                    reliability: 'medium',
+                    selector: { text: childText },
+                    syntax: `"${childText}"`
+                });
+            }
+        }
 
         // 2. Resource ID
         const idValue = element.resourceId || element['resource-id'] || element.attributes?.['resource-id'];
@@ -598,7 +624,22 @@ function App() {
             });
         }
 
-        // 4. Class Name (Fallback)
+        // 4. Point (Fallback that is always available)
+        if (element.bounds) {
+            const { left, top, right, bottom } = element.bounds;
+            const centerX = ((left + right) / 2 / deviceInfo.width) * 100;
+            const centerY = ((top + bottom) / 2 / deviceInfo.height) * 100;
+            locators.push({
+                type: 'Point',
+                label: 'Coordinates',
+                value: `${Math.round(centerX)}%, ${Math.round(centerY)}%`,
+                reliability: 'low',
+                selector: { point: `${Math.round(centerX)}%,${Math.round(centerY)}%` },
+                syntax: `point: "${Math.round(centerX)}%,${Math.round(centerY)}%"`
+            });
+        }
+
+        // 5. Class Name (Last Resort)
         const classValue = element.className || element.class || element.attributes?.class;
         if (classValue) {
             locators.push({
