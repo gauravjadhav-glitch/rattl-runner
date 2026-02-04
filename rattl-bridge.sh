@@ -102,10 +102,20 @@ cd "$WORKDIR/backend"
 if [ ! -d "venv" ]; then
     python3 -m venv venv
 fi
-# Avoid 'source' issues by using direct path
+
+# Attempt to install dependencies
+echo "📦 Installing dependencies..."
 if ! ./venv/bin/pip install -r requirements.txt; then
-    echo "❌ Failed to install Python dependencies."
-    exit 1
+    echo "⚠️  Dependency install failed. Possible broken environment."
+    echo "♻️  Recreating Python virtual environment..."
+    rm -rf venv
+    python3 -m venv venv
+    
+    # Retry install
+    if ! ./venv/bin/pip install -r requirements.txt; then
+        echo "❌ Critical Error: Failed to install Python dependencies."
+        exit 1
+    fi
 fi
 
 # --- 5. Execution ---
