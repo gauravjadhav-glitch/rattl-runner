@@ -10,7 +10,7 @@
   --accent-glow: rgba(0, 113, 227, 0.4);
   --border: rgba(255, 255, 255, 0.1);
   --header-height: 64px;
-  --sidebar-width: 280px;
+  --sidebar-width: 240px;
   --device-pane-width: 420px;
   --radius-lg: 16px;
   --radius-md: 10px;
@@ -129,7 +129,7 @@ body {
 .sidebar {
   width: var(--sidebar-width);
   background: var(--bg-secondary);
-  border-right: 1px solid var(--border);
+
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -139,7 +139,7 @@ body {
   padding: 1.25rem 1rem 0.5rem;
   font-weight: 700;
   color: var(--text-secondary);
-  font-size: 0.7rem;
+  font-size: 0.65rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   display: flex;
@@ -151,6 +151,8 @@ body {
   display: flex;
   padding: 0 0.5rem 0.75rem;
   gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.5rem;
 }
 
 .sidebar-action-btn {
@@ -468,15 +470,17 @@ body {
 
 .inspector-element {
   position: absolute;
-  border: 1px dotted rgba(44, 104, 246, 0.4);
+  border: 1px dotted rgba(44, 104, 246, 0.15);
   background: transparent;
   pointer-events: auto;
-  transition: all 0.1s;
+  transition: all 0.15s ease;
+  opacity: 0.4;
 }
 
 .inspector-element:hover {
-  background: rgba(44, 104, 246, 0.05);
-  border: 1px solid var(--accent);
+  opacity: 1;
+  background: rgba(44, 104, 246, 0.08);
+  border: 1.5px solid rgba(44, 104, 246, 0.6);
   z-index: 100;
 }
 
@@ -1250,4 +1254,100 @@ body {
     opacity: 1;
     transform: translateX(0);
   }
+}
+
+/* Resizer Overrides */
+.sidebar {
+  border-right: none !important;
+}
+
+.sidebar-resizer {
+  width: 12px;
+  margin-left: -6px;
+  background: transparent;
+  cursor: col-resize;
+  position: relative;
+  z-index: 100;
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+}
+
+.sidebar-resizer::after {
+  content: '';
+  width: 1px;
+  height: 100%;
+  background: var(--border);
+  transition: all 0.2s;
+}
+
+.sidebar-resizer:hover::after,
+.sidebar-resizer.active::after {
+  background: var(--accent);
+  width: 2px;
+}
+
+/* Resizers for Terminal and Device Pane */
+.terminal-panel {
+  height: var(--terminal-height, 300px) !important;
+}
+
+.device-pane {
+  flex: none !important;
+  width: var(--device-pane-width, 440px) !important;
+  min-width: 0 !important;
+}
+
+.terminal-resizer {
+  height: 10px;
+  width: 100%;
+  margin-bottom: -5px;
+  background: transparent;
+  cursor: row-resize;
+  position: relative;
+  z-index: 100;
+  flex-shrink: 0;
+}
+
+.terminal-resizer::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--border);
+  transition: all 0.2s;
+}
+
+.terminal-resizer:hover::after,
+.terminal-resizer.active::after {
+  background: var(--accent);
+  height: 2px;
+}
+
+.device-resizer {
+  width: 12px;
+  margin-left: -6px;
+  background: transparent;
+  cursor: col-resize;
+  position: relative;
+  z-index: 100;
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+}
+
+.device-resizer::after {
+  content: '';
+  width: 1px;
+  height: 100%;
+  background: var(--border);
+  transition: all 0.2s;
+}
+
+.device-resizer:hover::after,
+.device-resizer.active::after {
+  background: var(--accent);
+  width: 2px;
 }

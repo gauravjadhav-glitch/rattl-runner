@@ -12,7 +12,7 @@ mkdir -p "$BIN_DIR"
 export PATH="$BIN_DIR:$PATH"
 export PATH="$BIN_DIR/platform-tools:$PATH"
 
-OS_TYPE=$(uname -s)
+OS_TYPE=$(uname)
 ARCH_TYPE=$(uname -m)
 
 echo "ℹ️  System: $OS_TYPE ($ARCH_TYPE)"
