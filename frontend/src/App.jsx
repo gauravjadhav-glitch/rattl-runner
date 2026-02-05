@@ -67,6 +67,68 @@ const DEFAULT_API_URL = window.location.hostname.includes('vercel.app')
     : `${window.location.protocol}//${window.location.hostname === 'localhost' ? 'localhost' : window.location.hostname}:8000`;
 
 function App() {
+    const resizingTargetRef = useRef(null);
+
+    useEffect(() => {
+        const handleMouseMove = (e) => {
+            if (!resizingTargetRef.current) return;
+            e.preventDefault();
+
+            if (resizingTargetRef.current === 'sidebar') {
+                let w = e.clientX;
+                if (w < 150) w = 150;
+                if (w > 800) w = 800;
+                document.documentElement.style.setProperty('--sidebar-width', `${w}px`);
+            } else if (resizingTargetRef.current === 'terminal') {
+                let h = window.innerHeight - e.clientY;
+                if (h < 50) h = 50;
+                if (h > 600) h = 600;
+                document.documentElement.style.setProperty('--terminal-height', `${h}px`);
+            } else if (resizingTargetRef.current === 'device') {
+                let w = window.innerWidth - e.clientX;
+                if (w < 300) w = 300;
+                if (w > 900) w = 900;
+                document.documentElement.style.setProperty('--device-pane-width', `${w}px`);
+            }
+        };
+
+        const handleMouseUp = () => {
+            if (resizingTargetRef.current) {
+                resizingTargetRef.current = null;
+                document.body.style.cursor = 'default';
+                document.querySelectorAll('.sidebar-resizer, .terminal-resizer, .device-resizer').forEach(el => el.classList.remove('active'));
+            }
+        };
+
+        window.addEventListener('mousemove', handleMouseMove);
+        window.addEventListener('mouseup', handleMouseUp);
+        return () => {
+            window.removeEventListener('mousemove', handleMouseMove);
+            window.removeEventListener('mouseup', handleMouseUp);
+        };
+    }, []);
+
+    const startSidebarResize = (e) => {
+        e.preventDefault();
+        resizingTargetRef.current = 'sidebar';
+        document.body.style.cursor = 'col-resize';
+        e.target.classList.add('active');
+    };
+
+    const startTerminalResize = (e) => {
+        e.preventDefault();
+        resizingTargetRef.current = 'terminal';
+        document.body.style.cursor = 'row-resize';
+        e.target.classList.add('active');
+    };
+
+    const startDeviceResize = (e) => {
+        e.preventDefault();
+        resizingTargetRef.current = 'device';
+        document.body.style.cursor = 'col-resize';
+        e.target.classList.add('active');
+    };
+
     // --- State ---
     const [files, setFiles] = useState([]);
     const [currentFile, setCurrentFile] = useState(null);
@@ -91,9 +153,22 @@ function App() {
     const [errorLine, setErrorLine] = useState(null); // Track YAML error line number
     const [terminalInput, setTerminalInput] = useState('');
     const [activeTerminalTab, setActiveTerminalTab] = useState('OUTPUT');
+    const [isGeneratingAI, setIsGeneratingAI] = useState(false);
     const [terminalCwd, setTerminalCwd] = useState('backend');
     const [apiBaseUrl, setApiBaseUrl] = useState(localStorage.getItem('ratl_api_url') || import.meta.env.VITE_API_URL || DEFAULT_API_URL);
     const [isEditingUrl, setIsEditingUrl] = useState(false);
+    const [showSettings, setShowSettings] = useState(false);
+    const [apiKey, setApiKey] = useState(localStorage.getItem('openai_api_key') || '');
+
+    // Custom Modal States
+    const [fileToDelete, setFileToDelete] = useState(null);
+    const [fileToRename, setFileToRename] = useState(null);
+    const [renameValue, setRenameValue] = useState('');
+
+    // New Folder State
+    const [showNewFolderModal, setShowNewFolderModal] = useState(false);
+    const [newFolderName, setNewFolderName] = useState('');
+
     const [urlInput, setUrlInput] = useState(apiBaseUrl);
     const terminalInputRef = useRef(null);
 
@@ -558,22 +633,31 @@ function App() {
     const getAvailableLocators = (element) => {
         if (!element || element.isPoint) return [];
         const locators = [];
+        const isInput = element.className?.includes('EditText');
 
-        // 1. Text Content (Highest Priority)
+        // Capture locators in temporary storage first
+        const textLocs = [];
+        const idLocs = [];
+        const accLocs = [];
+
+        // 1. Text Content
         const textValue = (element.text || element.attributes?.text || '').trim();
         if (textValue) {
-            locators.push({
+            textLocs.push({
                 type: 'Text',
                 label: 'Visible Text',
                 value: textValue,
-                reliability: 'high',
+                reliability: isInput ? 'low' : 'high',
                 selector: { text: textValue },
                 syntax: `"${textValue}"`
             });
         }
-        // 1b. Child Text Content (if parent has no text)
-        else if (element.children && element.children.length > 0) {
-            // DFS to find first text node in children
+
+        // 1b. Child Text Content
+        let childText = null;
+
+        // Strategy A: Explicit Children Hierarchy (DFS)
+        if (element.children && element.children.length > 0) {
             const findTextInChildren = (node) => {
                 const t = (node.text || node.attributes?.text || '').trim();
                 if (t) return t;
@@ -585,23 +669,46 @@ function App() {
                 }
                 return null;
             };
-            const childText = findTextInChildren(element);
-            if (childText) {
-                locators.push({
-                    type: 'Text',
-                    label: 'Child Text',
-                    value: childText,
-                    reliability: 'medium',
-                    selector: { text: childText },
-                    syntax: `"${childText}"`
-                });
+            childText = findTextInChildren(element);
+        }
+        // Strategy B: Spatial Children (Flat List Fallback)
+        else if (elements && elements.length > 0 && element.bounds) {
+            const { left: pl, top: pt, right: pr, bottom: pb } = element.bounds;
+            // Find elements strictly contained within parent
+            const contained = elements.filter(el => {
+                if (el === element || !el.bounds) return false;
+                const { left: cl, top: ct, right: cr, bottom: cb } = el.bounds;
+                return cl >= pl && cr <= pr && ct >= pt && cb <= pb;
+            });
+
+            // Sort by area (smallest first - deeper in hierarchy) to get most specific text
+            contained.sort((a, b) => {
+                const areaA = (a.bounds.right - a.bounds.left) * (a.bounds.bottom - a.bounds.top);
+                const areaB = (b.bounds.right - b.bounds.left) * (b.bounds.bottom - b.bounds.top);
+                return areaA - areaB;
+            });
+
+            const textNode = contained.find(el => (el.text || el.attributes?.text || '').trim());
+            if (textNode) {
+                childText = (textNode.text || textNode.attributes?.text || '').trim();
             }
+        }
+
+        if (childText) {
+            textLocs.push({
+                type: 'Text',
+                label: 'Child Text',
+                value: childText,
+                reliability: 'medium',
+                selector: { text: childText },
+                syntax: `"${childText}"`
+            });
         }
 
         // 2. Resource ID
         const idValue = element.resourceId || element['resource-id'] || element.attributes?.['resource-id'];
         if (idValue) {
-            locators.push({
+            idLocs.push({
                 type: 'ID',
                 label: 'Resource ID',
                 value: idValue,
@@ -614,7 +721,7 @@ function App() {
         // 3. Accessibility / Content Description
         const descValue = element.contentDescription || element['content-desc'] || element.attributes?.['content-desc'] || element.hint;
         if (descValue) {
-            locators.push({
+            accLocs.push({
                 type: 'Accessibility',
                 label: 'Accessibility ID',
                 value: descValue,
@@ -622,6 +729,19 @@ function App() {
                 selector: { accessibilityId: descValue },
                 syntax: `accessibilityId: "${descValue}"`
             });
+        }
+
+        // PRIORITIZATION LOGIC
+        if (isInput) {
+            // For inputs: ID > Accessibility > Text (Value is mutable)
+            locators.push(...idLocs);
+            locators.push(...accLocs);
+            locators.push(...textLocs);
+        } else {
+            // For static elements: Text > ID > Accessibility
+            locators.push(...textLocs);
+            locators.push(...idLocs);
+            locators.push(...accLocs);
         }
 
         // 4. Point (Fallback that is always available)
@@ -638,6 +758,8 @@ function App() {
                 syntax: `point: "${Math.round(centerX)}%,${Math.round(centerY)}%"`
             });
         }
+
+        return locators;
 
         // 5. Class Name (Last Resort)
         const classValue = element.className || element.class || element.attributes?.class;
@@ -837,7 +959,10 @@ function App() {
             const response = await fetch(`${apiBaseUrl}/run`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ yaml_content: editorContent }),
+                body: JSON.stringify({
+                    yaml_content: editorContent,
+                    apiKey: apiKey // Pass the stored key
+                }),
                 signal: abortControllerRef.current.signal
             });
 
@@ -1087,7 +1212,13 @@ function App() {
 
     const deleteItem = async (e, file) => {
         e.stopPropagation();
-        if (!confirm(`Are you sure you want to delete ${file.name}?`)) return;
+        setFileToDelete(file);
+    };
+
+    const confirmDelete = async () => {
+        if (!fileToDelete) return;
+        const file = fileToDelete;
+        setFileToDelete(null); // Close modal
 
         try {
             const res = await fetch(`${apiBaseUrl}/file?path=${encodeURIComponent(file.path)}`, {
@@ -1112,8 +1243,16 @@ function App() {
 
     const renameItem = async (e, file) => {
         e.stopPropagation();
-        const newName = prompt("Enter new name:", file.name);
-        if (!newName || newName === file.name) return;
+        setFileToRename(file);
+        setRenameValue(file.path); // Use full path to keep folder structure
+    };
+
+    const confirmRename = async () => {
+        if (!fileToRename || !renameValue || renameValue === fileToRename.name) return;
+        const file = fileToRename;
+        const newName = renameValue;
+
+        setFileToRename(null); // Close modal
 
         try {
             const res = await fetch(`${apiBaseUrl}/file`, {
@@ -1227,27 +1366,80 @@ function App() {
             return;
         }
 
-        // Default: Insert command based on best available selector
+        // When Inspector is OFF: Still show element selection and Inspector panel
+        // (Users can choose which action to perform, not just auto-insert Tap On)
         if (bestMatch) {
-            const locs = getAvailableLocators(bestMatch);
-            if (locs && locs.length > 0) {
-                // Use text-based selector
-                const locator = locs[0];
-                const yaml = formatYaml('tapOn', locator.selector);
-                setEditorContent(prev => prev + (prev.endsWith('\n') ? '' : '\n') + yaml + '\n');
-                addLog('success', `Added: Tap on "${locator.value}"`);
-            } else {
-                // Fallback to element center coordinates
-                const { left, top, right, bottom } = bestMatch.bounds;
-                const centerX = ((left + right) / 2 / deviceInfo.width) * 100;
-                const centerY = ((top + bottom) / 2 / deviceInfo.height) * 100;
-                const cmd = `- tapOn:\n    point: "${Math.round(centerX)}%,${Math.round(centerY)}%"\n`;
-                setEditorContent(prev => prev + (prev.endsWith('\n') ? '' : '\n') + cmd);
-            }
+            const { left: l, top: t, right: r, bottom: b } = bestMatch.bounds;
+            setPopupPosition({
+                x: ((l + r) / 2 / deviceInfo.width) * 100,
+                y: ((t + b) / 2 / deviceInfo.height) * 100
+            });
+            setSelectedElement(bestMatch);
+            setSelectedLocatorIndex(0);
         } else {
-            // No element found - use click coordinates
-            const cmd = `- tapOn:\n    point: "${Math.round(xPct)}%,${Math.round(yPct)}%"\n`;
-            setEditorContent(prev => prev + (prev.endsWith('\n') ? '' : '\n') + cmd);
+            setSelectedElement({
+                text: `Point (${Math.round(xPct)}%, ${Math.round(yPct)}%)`,
+                isPoint: true,
+                bounds: { left: x, top: y, right: x, bottom: y }
+            });
+            setPopupPosition({ x: xPct, y: yPct });
+        }
+    };
+
+    const handleAIGenerate = async (e, customInstruction = null) => {
+        if (e) e.stopPropagation();
+        setIsGeneratingAI(true);
+        addLog('info', customInstruction ? 'Generating bulk tests...' : 'Asking AI to generate step...');
+
+        try {
+            // 1. Capture Screenshot (Fetch from backend endpoint)
+            const snapRes = await fetch(`${apiBaseUrl}/screenshot?t=${Date.now()}`);
+            const blob = await snapRes.blob();
+
+            // Convert Blob to Base64
+            const reader = new FileReader();
+            reader.onloadend = async () => {
+                const base64data = reader.result.split(',')[1];
+
+                // 2. Hierarchy
+                const hierarchyStr = JSON.stringify(hierarchy || {});
+
+                // 3. Context
+                const elementCtx = selectedElement.isPoint
+                    ? `User clicked point at ${Math.round(popupPosition?.x || 0)}%, ${Math.round(popupPosition?.y || 0)}%`
+                    : `User selected element: ${JSON.stringify(selectedElement)}`;
+
+                const payload = {
+                    screenshot: base64data,
+                    hierarchy: hierarchyStr,
+                    context: elementCtx,
+                    apiKey: apiKey,
+                    instruction: customInstruction
+                };
+
+                // 4. Call API
+                const res = await fetch(`${apiBaseUrl}/api/ai/generate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const data = await res.json();
+                if (data.success) {
+                    const stepCount = (editorContent.match(/^\s*-\s+/gm) || []).length + 1;
+                    const cmd = `# ${stepCount}. ${customInstruction ? 'Bulk Assertions' : 'AI Step'}\n${data.yaml}`;
+                    setEditorContent(prev => prev + (prev.endsWith('\n') ? '' : '\n') + cmd + '\n');
+                    addLog('success', 'AI Generated Code successfully!');
+                } else {
+                    addLog('error', `AI Error: ${data.error}`);
+                }
+                setIsGeneratingAI(false);
+            };
+            reader.readAsDataURL(blob);
+
+        } catch (err) {
+            addLog('error', `AI Request Failed: ${err.message}`);
+            setIsGeneratingAI(false);
         }
     };
 
@@ -1260,6 +1452,15 @@ function App() {
                     <h2 className="header-title">Ratl Studio</h2>
                 </div>
                 <div className="header-controls">
+                    <button
+                        className="btn"
+                        style={{ background: 'none', border: 'none', color: '#888' }}
+                        onClick={() => setShowSettings(true)}
+                        title="Settings"
+                    >
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                    </button>
+
                     <div className="device-status" style={{ position: 'relative' }}>
                         <span className={`status-dot ${deviceConnected ? 'connected' : ''}`} />
                         <span
@@ -1327,22 +1528,21 @@ function App() {
             <div className="main-layout">
                 {/* 1. Sidebar */}
                 <aside className="sidebar">
-                    <div className="sidebar-header">
+                    <div className="sidebar-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <span>EXPLORER</span>
+                        <button onClick={fetchFiles} className="action-btn" title="Refresh Files">
+                            <span style={{ fontSize: '12px' }}>🔄</span>
+                        </button>
                     </div>
                     <div className="sidebar-actions-row">
-                        <button onClick={() => setShowModal(true)} className="sidebar-action-btn">
+                        <button onClick={() => {
+                            setModalData(prev => ({ ...prev, name: '' }));
+                            setShowModal(true);
+                        }} className="sidebar-action-btn">
                             <NewTestIcon />
                             <span>New Test</span>
                         </button>
-                        <button onClick={() => {
-                            const folder = prompt('Folder Name:');
-                            if (folder) fetch(`${apiBaseUrl}/files`, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ path: folder, type: 'folder' })
-                            }).then(() => fetchFiles())
-                        }} className="sidebar-action-btn">
+                        <button onClick={() => setShowNewFolderModal(true)} className="sidebar-action-btn">
                             <NewFolderIcon />
                             <span>New Folder</span>
                         </button>
@@ -1412,7 +1612,7 @@ function App() {
                                         {isFolder && (
                                             <button className="action-btn" onClick={(e) => {
                                                 e.stopPropagation();
-                                                setModalData({ name: `${file.path}/` });
+                                                setModalData(prev => ({ ...prev, name: `${file.path}/` }));
                                                 setShowModal(true);
                                             }} title="New Test in Folder">
                                                 <span style={{ fontSize: '14px', fontWeight: 'bold' }}>+</span>
@@ -1441,6 +1641,7 @@ function App() {
                         )}
                     </ul>
                 </aside>
+                <div className="sidebar-resizer" onMouseDown={startSidebarResize} />
 
                 {/* 2. Editor & Terminal */}
                 <div className="editor-pane">
@@ -1528,6 +1729,12 @@ function App() {
                                             lineNumbersRef.current.scrollTop = e.target.scrollTop;
                                         }
                                     }}
+                                    onKeyDown={(e) => {
+                                        if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                                            e.preventDefault();
+                                            saveFile();
+                                        }
+                                    }}
                                     spellCheck="false"
                                 />
                             </div>
@@ -1537,6 +1744,7 @@ function App() {
                     )}
 
                     {/* Terminal (VS Code Style) */}
+                    <div className="terminal-resizer" onMouseDown={startTerminalResize} />
                     <div className="terminal-panel">
                         <div className="terminal-header">
                             <div className="terminal-tabs">
@@ -1626,6 +1834,7 @@ function App() {
                 </div>
 
                 {/* 3. Device & Inspector */}
+                <div className="device-resizer" onMouseDown={startDeviceResize} />
                 <aside className={`device-pane ${showInspector ? 'inspector-active' : ''}`}>
 
                     {!deviceConnected ? (
@@ -1831,62 +2040,7 @@ function App() {
                                         </div>
 
                                         <div style={{ flex: 1, overflowY: 'auto', padding: '16px' }}>
-                                            <div style={{ marginBottom: '20px' }}>
-                                                <div style={{ fontSize: '9px', color: '#666', fontWeight: 800, textTransform: 'uppercase', marginBottom: '8px' }}>Selected Element</div>
-                                                <div style={{ padding: '12px', background: 'rgba(255,255,255,0.03)', borderRadius: '12px', border: '1px solid var(--border)' }}>
-                                                    <div style={{ fontSize: '14px', fontWeight: '700', color: '#fff', marginBottom: '6px', wordBreak: 'break-all' }}>
-                                                        {(() => {
-                                                            const text = selectedElement.text || (selectedElement.attributes?.text) || selectedElement.contentDescription || selectedElement['content-desc'] || selectedElement.attributes?.['content-desc'];
-                                                            if (text && !selectedElement.isPoint) return text;
-                                                            if (selectedElement.isPoint) return `Location: ${Math.round(popupPosition?.x)}%, ${Math.round(popupPosition?.y)}%`;
-                                                            const resId = selectedElement.resourceId || selectedElement['resource-id'] || selectedElement.attributes?.['resource-id'];
-                                                            if (resId) return resId.split('/').pop();
-                                                            return selectedElement.className?.split('.').pop() || 'Unknown Element';
-                                                        })()}
-                                                    </div>
-                                                    <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
-                                                        <div style={{ padding: '2px 6px', borderRadius: '4px', background: 'rgba(44, 104, 246, 0.2)', color: 'var(--accent)', fontSize: '9px', fontWeight: 800, textTransform: 'uppercase' }}>
-                                                            {selectedElement.isPoint ? 'Point' : (selectedElement.text ? 'Text' : (selectedElement.resourceId || selectedElement['resource-id'] ? 'ID' : 'Element'))}
-                                                        </div>
-                                                        <div style={{ fontSize: '10px', color: '#666', fontFamily: 'JetBrains Mono' }}>
-                                                            {selectedElement.isPoint ? `${Math.round(popupPosition?.x)}%, ${Math.round(popupPosition?.y)}%` : selectedElement.className || ''}
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            </div>
 
-                                            {/* Attributes Section */}
-                                            {!selectedElement.isPoint && (
-                                                <div style={{ marginBottom: '20px' }}>
-                                                    <div style={{ fontSize: '9px', color: '#666', fontWeight: 800, textTransform: 'uppercase', marginBottom: '8px' }}>Attributes</div>
-                                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
-                                                        {[
-                                                            { label: 'Clickable', val: selectedElement.clickable || selectedElement.attributes?.clickable === 'true' },
-                                                            { label: 'Enabled', val: selectedElement.enabled || selectedElement.attributes?.enabled === 'true' },
-                                                            { label: 'Focusable', val: selectedElement.focusable || selectedElement.attributes?.focusable === 'true' },
-                                                            { label: 'Checked', val: selectedElement.checked || selectedElement.attributes?.checked === 'true' },
-                                                            { label: 'Long Clickable', val: selectedElement['long-clickable'] || selectedElement.attributes?.['long-clickable'] === 'true' },
-                                                            { label: 'Scrollable', val: selectedElement.scrollable || selectedElement.attributes?.scrollable === 'true' }
-                                                        ].map(attr => (
-                                                            <div key={attr.label} style={{
-                                                                display: 'flex',
-                                                                justifyContent: 'space-between',
-                                                                alignItems: 'center',
-                                                                padding: '6px 10px',
-                                                                background: attr.val ? 'rgba(16, 185, 129, 0.05)' : 'rgba(255,255,255,0.02)',
-                                                                borderRadius: '6px',
-                                                                border: `1px solid ${attr.val ? 'rgba(16, 185, 129, 0.2)' : 'var(--border)'}`,
-                                                                opacity: attr.val ? 1 : 0.5
-                                                            }}>
-                                                                <span style={{ fontSize: '10px', color: '#888' }}>{attr.label}</span>
-                                                                <span style={{ fontSize: '10px', fontWeight: 'bold', color: attr.val ? '#10b981' : '#666' }}>
-                                                                    {attr.val ? 'YES' : 'NO'}
-                                                                </span>
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                </div>
-                                            )}
 
                                             {(() => {
                                                 const locators = getAvailableLocators(selectedElement);
@@ -1897,11 +2051,36 @@ function App() {
                                                 const selector = currentLocator.selector;
                                                 const stepCount = (editorContent.match(/^\s*-\s+/gm) || []).length + 1;
 
+                                                const labelText = currentLocator.type === 'Text' ? currentLocator.value : '';
+                                                const displayLabel = labelText.length > 20 ? labelText.substring(0, 18) + '...' : labelText;
+
                                                 const groups = [
                                                     {
                                                         title: '👉 Tap & Click',
                                                         actions: [
-                                                            { label: 'Tap Element', yaml: formatYaml('tapOn', selector), cmd: 'tapOn' }
+                                                            { label: displayLabel ? `Tap "${displayLabel}"` : 'Tap Element', yaml: formatYaml('tapOn', selector), cmd: 'tapOn' }
+                                                        ]
+                                                    },
+                                                    {
+                                                        title: '👁️ Assertions',
+                                                        actions: [
+                                                            { label: displayLabel ? `Assert "${displayLabel}"` : 'Assert Visible', yaml: formatYaml('assertVisible', selector), cmd: 'assertVisible' },
+                                                            { label: 'Assert Not Visible', yaml: formatYaml('assertNotVisible', selector), cmd: 'assertNotVisible' },
+                                                            {
+                                                                label: (() => {
+                                                                    const textLoc = locators.find(l => l.type === 'Text');
+                                                                    const accLoc = locators.find(l => l.type === 'Accessibility');
+                                                                    const t = textLoc ? textLoc.value : (accLoc ? accLoc.value : (selectedElement.text || selectedElement.attributes?.text || selectedElement.contentDescription || selectedElement['content-desc']));
+                                                                    return t ? `Assert "${t.length > 15 ? t.slice(0, 12) + '...' : t}"` : 'Assert Text';
+                                                                })(),
+                                                                yaml: (() => {
+                                                                    const textLoc = locators.find(l => l.type === 'Text');
+                                                                    const accLoc = locators.find(l => l.type === 'Accessibility');
+                                                                    const t = textLoc ? textLoc.value : (accLoc ? accLoc.value : (selectedElement.text || selectedElement.attributes?.text || selectedElement.contentDescription || selectedElement['content-desc']));
+                                                                    return t ? `- assertVisible: "${t.replace(/"/g, '\\"')}"` : `- assertVisible: "Expected Text"`;
+                                                                })(),
+                                                                cmd: 'assertVisible'
+                                                            }
                                                         ]
                                                     },
                                                     {
@@ -1929,14 +2108,6 @@ function App() {
                                                         ]
                                                     },
                                                     {
-                                                        title: '👁️ Assertions',
-                                                        actions: [
-                                                            { label: 'Assert Visible', yaml: formatYaml('assertVisible', selector), cmd: 'assertVisible' },
-                                                            { label: 'Assert Not Visible', yaml: formatYaml('assertNotVisible', selector), cmd: 'assertNotVisible' },
-                                                            { label: 'Assert Text', yaml: `- assertVisible: "Expected Text"`, cmd: 'assertVisible' }
-                                                        ]
-                                                    },
-                                                    {
                                                         title: '⏱️ Wait & Timing',
                                                         actions: [
                                                             { label: 'Wait for Visible', yaml: formatYaml('extendedWaitUntil', { visible: selector, timeout: 10000 }), cmd: 'extendedWaitUntil' },
@@ -1954,62 +2125,37 @@ function App() {
 
                                                 return (
                                                     <>
-                                                        {!selectedElement.isPoint && (
-                                                            <div style={{ marginBottom: '24px' }}>
-                                                                <div style={{ fontSize: '9px', color: 'var(--accent)', fontWeight: 800, textTransform: 'uppercase', marginBottom: '12px', letterSpacing: '0.05em' }}>Available Selectors</div>
-                                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                                                    {locators.map((loc, idx) => (
-                                                                        <div
-                                                                            key={idx}
-                                                                            onClick={() => setSelectedLocatorIndex(idx)}
-                                                                            style={{
-                                                                                padding: '12px',
-                                                                                background: selectedLocatorIndex === idx ? 'rgba(44, 104, 246, 0.1)' : 'rgba(255,255,255,0.02)',
-                                                                                border: `1px solid ${selectedLocatorIndex === idx ? 'var(--accent)' : 'var(--border)'}`,
-                                                                                borderRadius: '10px',
-                                                                                cursor: 'pointer',
-                                                                                transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
-                                                                                display: 'flex',
-                                                                                justifyContent: 'space-between',
-                                                                                alignItems: 'center',
-                                                                                position: 'relative',
-                                                                                overflow: 'hidden'
-                                                                            }}
-                                                                        >
-                                                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', flex: 1, marginRight: '8px' }}>
-                                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                                                    <div style={{ fontSize: '8px', color: selectedLocatorIndex === idx ? 'var(--accent)' : '#666', fontWeight: 800, textTransform: 'uppercase' }}>{loc.type}</div>
-                                                                                    {loc.reliability === 'high' && <div style={{ width: '4px', height: '4px', borderRadius: '50%', background: '#10b981' }} title="High Reliability"></div>}
-                                                                                </div>
-                                                                                <div style={{ fontSize: '11px', color: selectedLocatorIndex === idx ? '#fff' : '#aaa', wordBreak: 'break-all', fontFamily: 'JetBrains Mono' }}>{loc.value}</div>
-                                                                            </div>
-                                                                            <button
-                                                                                onClick={(e) => {
-                                                                                    e.stopPropagation();
-                                                                                    navigator.clipboard.writeText(loc.value);
-                                                                                    addLog('success', `Copied ${loc.type} to clipboard`);
-                                                                                }}
-                                                                                style={{
-                                                                                    background: 'rgba(255,255,255,0.05)',
-                                                                                    border: 'none',
-                                                                                    borderRadius: '6px',
-                                                                                    padding: '6px',
-                                                                                    color: '#666',
-                                                                                    cursor: 'pointer',
-                                                                                    display: 'flex',
-                                                                                    alignItems: 'center',
-                                                                                    justifyContent: 'center',
-                                                                                    transition: 'all 0.2s'
-                                                                                }}
-                                                                                title="Copy"
-                                                                            >
-                                                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                                                                            </button>
-                                                                        </div>
-                                                                    ))}
-                                                                </div>
+
+
+                                                        <div style={{ marginBottom: '24px' }}>
+                                                            <div style={{ fontSize: '9px', color: 'var(--accent)', fontWeight: 800, textTransform: 'uppercase', marginBottom: '8px', letterSpacing: '0.05em' }}>AI Assistant</div>
+                                                            <div style={{ display: 'flex', gap: '8px' }}>
+                                                                <button
+                                                                    className="inspector-action-btn"
+                                                                    style={{ flex: 1, border: '1px solid var(--accent)', background: 'rgba(44, 104, 246, 0.1)' }}
+                                                                    onClick={(e) => handleAIGenerate(e, null)}
+                                                                    disabled={isGeneratingAI}
+                                                                    title="Generate single step for selected"
+                                                                >
+                                                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+                                                                        {isGeneratingAI ? <span className="spin" style={{ fontSize: '12px' }}>↻</span> : <span style={{ fontSize: '12px' }}>✨</span>}
+                                                                        <span style={{ fontWeight: 600, fontSize: '11px' }}>One Step</span>
+                                                                    </div>
+                                                                </button>
+                                                                <button
+                                                                    className="inspector-action-btn"
+                                                                    style={{ flex: 1, border: '1px solid #10b981', background: 'rgba(16, 185, 129, 0.1)' }}
+                                                                    onClick={(e) => handleAIGenerate(e, "Generate comprehensive assertions for ALL visible text elements and buttons on this screen. List them one by one.")}
+                                                                    disabled={isGeneratingAI}
+                                                                    title="Verify all visible elements"
+                                                                >
+                                                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+                                                                        {isGeneratingAI ? <span className="spin" style={{ fontSize: '12px' }}>↻</span> : <span style={{ fontSize: '12px' }}>👁️</span>}
+                                                                        <span style={{ fontWeight: 600, fontSize: '11px' }}>Verify Page</span>
+                                                                    </div>
+                                                                </button>
                                                             </div>
-                                                        )}
+                                                        </div>
 
                                                         <div style={{ marginTop: '24px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
                                                             {groups.map((group, gIdx) => (
@@ -2170,6 +2316,215 @@ function App() {
                         <div className="modal-footer">
                             <button className="btn btn-secondary" onClick={() => setShowModal(false)}>Cancel</button>
                             <button className="btn btn-primary" onClick={createTestFlow} disabled={!modalData.name}>Create Test</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {showSettings && (
+                <div style={{
+                    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                    background: 'rgba(0,0,0,0.8)', zIndex: 2000,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    backdropFilter: 'blur(5px)'
+                }}>
+                    <div style={{
+                        background: 'var(--bg-secondary)', padding: '24px',
+                        borderRadius: '16px', border: '1px solid var(--border)',
+                        width: '400px',
+                        boxShadow: '0 20px 50px rgba(0,0,0,0.5)'
+                    }}>
+                        <h3 style={{ margin: '0 0 16px 0', fontSize: '18px', fontWeight: 600 }}>Settings</h3>
+
+                        <div style={{ marginBottom: '20px' }}>
+                            <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#888', marginBottom: '8px' }}>
+                                OpenAI API Key
+                            </label>
+                            <input
+                                type="password"
+                                value={apiKey}
+                                onChange={(e) => setApiKey(e.target.value)}
+                                placeholder="sk-..."
+                                style={{
+                                    width: '100%',
+                                    background: 'rgba(0,0,0,0.3)',
+                                    border: '1px solid var(--border)',
+                                    borderRadius: '8px',
+                                    padding: '10px',
+                                    color: '#fff',
+                                    fontSize: '13px',
+                                    outline: 'none'
+                                }}
+                            />
+                            <p style={{ fontSize: '11px', color: '#666', marginTop: '6px' }}>
+                                Required for AI Auto-Generation features. Stored locally.
+                            </p>
+                        </div>
+
+                        <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+                            <button
+                                onClick={() => setShowSettings(false)}
+                                style={{
+                                    background: 'transparent', border: '1px solid var(--border)',
+                                    color: '#fff', padding: '8px 16px', borderRadius: '8px', cursor: 'pointer'
+                                }}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={() => {
+                                    localStorage.setItem('openai_api_key', apiKey);
+                                    setShowSettings(false);
+                                    addLog('success', 'Settings saved successfully');
+                                }}
+                                style={{
+                                    background: 'var(--accent)', border: 'none',
+                                    color: '#fff', padding: '8px 16px', borderRadius: '8px', cursor: 'pointer', fontWeight: 600
+                                }}
+                            >
+                                Save Settings
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {/* Delete Confirmation Modal */}
+            {fileToDelete && (
+                <div style={{
+                    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                    background: 'rgba(0,0,0,0.8)', zIndex: 2000,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    backdropFilter: 'blur(5px)'
+                }}>
+                    <div style={{
+                        background: 'var(--bg-secondary)', padding: '24px',
+                        borderRadius: '16px', border: '1px solid var(--border)',
+                        width: '350px',
+                        boxShadow: '0 20px 50px rgba(0,0,0,0.5)',
+                        textAlign: 'center'
+                    }}>
+                        <h3 style={{ margin: '0 0 16px 0', fontSize: '18px', fontWeight: 600, color: 'var(--danger)' }}>Delete File?</h3>
+                        <p style={{ color: '#aaa', marginBottom: '24px' }}>
+                            Are you sure you want to delete <strong>{fileToDelete.name}</strong>?<br />
+                            This action cannot be undone.
+                        </p>
+                        <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
+                            <button className="btn btn-secondary" onClick={() => setFileToDelete(null)}>Cancel</button>
+                            <button className="btn" style={{ background: 'var(--danger)', color: 'white', border: 'none' }} onClick={confirmDelete}>Delete</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Rename Modal */}
+            {fileToRename && (
+                <div style={{
+                    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                    background: 'rgba(0,0,0,0.8)', zIndex: 2000,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    backdropFilter: 'blur(5px)'
+                }}>
+                    <div style={{
+                        background: 'var(--bg-secondary)', padding: '24px',
+                        borderRadius: '16px', border: '1px solid var(--border)',
+                        width: '350px',
+                        boxShadow: '0 20px 50px rgba(0,0,0,0.5)'
+                    }}>
+                        <h3 style={{ margin: '0 0 16px 0', fontSize: '18px', fontWeight: 600 }}>Rename File</h3>
+                        <input
+                            type="text"
+                            value={renameValue}
+                            onChange={(e) => setRenameValue(e.target.value)}
+                            placeholder="New filename"
+                            autoFocus
+                            style={{
+                                width: '100%',
+                                background: 'rgba(0,0,0,0.3)',
+                                border: '1px solid var(--border)',
+                                borderRadius: '8px',
+                                padding: '12px',
+                                color: '#fff',
+                                marginBottom: '20px',
+                                outline: 'none'
+                            }}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') confirmRename();
+                                if (e.key === 'Escape') setFileToRename(null);
+                            }}
+                        />
+                        <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+                            <button className="btn btn-secondary" onClick={() => setFileToRename(null)}>Cancel</button>
+                            <button className="btn btn-primary" onClick={confirmRename}>Rename</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {/* New Folder Modal */}
+            {showNewFolderModal && (
+                <div style={{
+                    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                    background: 'rgba(0,0,0,0.8)', zIndex: 2000,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    backdropFilter: 'blur(5px)'
+                }}>
+                    <div style={{
+                        background: 'var(--bg-secondary)', padding: '24px',
+                        borderRadius: '16px', border: '1px solid var(--border)',
+                        width: '350px',
+                        boxShadow: '0 20px 50px rgba(0,0,0,0.5)'
+                    }}>
+                        <h3 style={{ margin: '0 0 16px 0', fontSize: '18px', fontWeight: 600 }}>Create New Folder</h3>
+                        <input
+                            type="text"
+                            value={newFolderName}
+                            onChange={(e) => setNewFolderName(e.target.value)}
+                            placeholder="Folder Name"
+                            autoFocus
+                            style={{
+                                width: '100%',
+                                background: 'rgba(0,0,0,0.3)',
+                                border: '1px solid var(--border)',
+                                borderRadius: '8px',
+                                padding: '12px',
+                                color: '#fff',
+                                marginBottom: '20px',
+                                outline: 'none'
+                            }}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                    if (newFolderName) {
+                                        fetch(`${apiBaseUrl}/files`, {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ path: newFolderName, type: 'folder' })
+                                        })
+                                            .then(() => {
+                                                fetchFiles();
+                                                setShowNewFolderModal(false);
+                                                setNewFolderName('');
+                                            })
+                                            .catch(err => addLog('error', `Failed to create folder: ${err.message}`));
+                                    }
+                                }
+                                if (e.key === 'Escape') setShowNewFolderModal(false);
+                            }}
+                        />
+                        <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+                            <button className="btn btn-secondary" onClick={() => setShowNewFolderModal(false)}>Cancel</button>
+                            <button className="btn btn-primary" onClick={() => {
+                                if (newFolderName) {
+                                    fetch(`${apiBaseUrl}/files`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ path: newFolderName, type: 'folder' })
+                                    })
+                                        .then(() => {
+                                            fetchFiles();
+                                            setShowNewFolderModal(false);
+                                            setNewFolderName('');
+                                        })
+                                        .catch(err => addLog('error', `Failed to create folder: ${err.message}`));
+                                }
+                            }}>Create</button>
                         </div>
                     </div>
                 </div>

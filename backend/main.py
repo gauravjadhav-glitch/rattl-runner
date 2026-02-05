@@ -9,6 +9,7 @@ import glob
 import io
 import json
 import yaml
+import requests
 try:
     import runner
 except ImportError:
@@ -29,6 +30,7 @@ app.add_middleware(
 
 class TestRequest(BaseModel):
     yaml_content: str
+    apiKey: str = "" # Optional, for AI Vision features
 
 class FileSaveRequest(BaseModel):
     path: str
@@ -74,7 +76,7 @@ class RunStepRequest(BaseModel):
 
 @app.post("/validate-yaml")
 def validate_yaml(request: TestRequest):
-    """Validate YAML syntax without running the test"""
+    """Validate YAML syntax AND Maestro Schema"""
     if not request.yaml_content:
         return {"valid": False, "error": "YAML content is empty"}
     
@@ -92,8 +94,35 @@ def validate_yaml(request: TestRequest):
         
         if not isinstance(flow, list):
             return {"valid": False, "error": "Test flow must be a list of steps (starting with '-')"}
+
+        # --- Maestro Schema Validation ---
+        VALID_COMMANDS = {
+            "tapOn", "doubleTapOn", "longPressOn", 
+            "inputText", "eraseText", "inputRandomText", "inputRandomNumber", "inputRandomEmail", "inputRandomPersonName",
+            "assertVisible", "assertNotVisible", "assertTrue",
+            "scroll", "swipe", "pressKey", "back", "hideKeyboard", "volumeUp", "volumeDown",
+            "openLink", "stopApp", "clearState", "clearKeychain", "launchApp", "killApp",
+            "runFlow", "extendedWaitUntil", "waitForAnimationToEnd", "waitForAnimation",
+            "repeat", "webhook", "takeScreenshot",
+            "copyTextFrom", "pasteText",
+            "evalScript", "runScript",
+            "startRecording", "stopRecording",
+            "setLocation", "travel"
+        }
+
+        for i, step in enumerate(flow):
+            if not isinstance(step, dict):
+                continue # Comment string or something
+            
+            for key in step.keys():
+                if key not in VALID_COMMANDS:
+                    return {
+                        "valid": False, 
+                        "error": f"Unknown Command at Step {i+1}: '{key}'. Did you mean 'assertVisible'?",
+                        "line": i + 2 # Approx line estimate (Header takes ~2 lines + i)
+                    }
         
-        return {"valid": True, "message": f"Valid YAML with {len(flow)} steps"}
+        return {"valid": True, "message": f"Valid Maestro Code ({len(flow)} steps)"}
         
     except yaml.YAMLError as e:
         error_msg = str(e)
@@ -131,7 +160,7 @@ def run_test(request: TestRequest):
             error_msg = f"YAML Syntax Error at line {mark.line + 1}, column {mark.column + 1}: {e.problem}"
         raise HTTPException(status_code=400, detail=error_msg)
 
-    return StreamingResponse(runner.run_yaml_custom(request.yaml_content), media_type="text/event-stream")
+    return StreamingResponse(runner.run_yaml_custom(request.yaml_content, api_key=request.apiKey), media_type="text/event-stream")
 
 class RunFolderRequest(BaseModel):
     folder_path: str
@@ -360,6 +389,83 @@ def get_screenshot():
             
     # If all failed
     raise HTTPException(status_code=503, detail="Screenshot failed with all methods")
+            
+
+# --- AI Generation ---
+
+class AIRequest(BaseModel):
+    screenshot: str # Base64 encoded image
+    hierarchy: str
+    context: str = ""
+    apiKey: str = "" # Optional
+    instruction: str = "" # Specific AI task
+
+@app.post("/api/ai/generate")
+def generate_step_ai(request: AIRequest):
+    # 1. Get Key
+    api_key = request.apiKey or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {
+            "success": False, 
+            "error": "Missing API Key. Please provide OPENAI_API_KEY in environment or settings."
+        }
+    
+    # 2. Call LLM (OpenAI)
+    try:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # Prepare Prompt
+        base_instruction = request.instruction or "Based on the user's context, output a SINGLE valid Maestro YAML step."
+        
+        system_prompt = (
+            "You are an expert in Maestro (mobile automation). "
+            "Analyze the provided Android screenshot and view hierarchy. "
+            f"{base_instruction} "
+            "CRITICAL RULES:\n"
+            "1. EXTRACT TEXT EXACTLY: When generating `assertVisible` or `tapOn`, copy text *exactly* as it appears in the screenshot (preserve case, full length).\n"
+            "2. NO TYPOS: Do not truncate words (e.g., use 'Profile', not 'Profil').\n"
+            "3. STRICT MATCHING: For `assertVisible`, ALWAYS use regex format: `assertVisible: \"regexp:^TEXT$\"`. This enforces exact match. Escape special regex characters like bracket or dot.\n"
+            "4. USE VALID YAML: Output ONLY the YAML block. No markdown."
+        )
+        
+        user_content = [
+             {"type": "text", "text": f"Context: {request.context}\nHierarchy Info (Truncated): {request.hierarchy[:15000]}"},
+             {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{request.screenshot}"}}
+        ]
+        
+        payload = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            "max_tokens": 500, # Increased for bulk generation
+            "temperature": 0.2
+        }
+        
+        # 3. Request
+        resp = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
+        
+        if resp.status_code != 200:
+             return {"success": False, "error": f"OpenAI Error ({resp.status_code}): {resp.text}"}
+             
+        data = resp.json()
+        if "error" in data:
+             return {"success": False, "error": data["error"]["message"]}
+             
+        # 4. Parse
+        content = data["choices"][0]["message"]["content"]
+        # Clean up
+        content = content.replace("```yaml", "").replace("```", "").strip()
+        
+        return {"success": True, "yaml": content}
+        
+    except Exception as e:
+        print(f"AI Generation Failed: {e}")
+        return {"success": False, "error": str(e)}
             
 
 
