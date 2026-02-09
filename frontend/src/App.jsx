@@ -441,7 +441,7 @@ function App() {
             });
 
             if (connected && !deviceConnected) {
-                addLog('success', '✨ Device detected! Connection established.');
+                // Device connected - silently update state
                 fetchDeviceInfo();
                 fetchPackages();
             } else if (!connected && deviceConnected) {
@@ -954,7 +954,7 @@ function App() {
 
             // Clear error line if validation passes
             setErrorLine(null);
-            addLog('success', `✅ ${validation.message || 'Valid YAML'}`);
+            // Validation passed - silently proceed
         } catch (e) {
             addLog('error', `Validation error: ${e.message}`);
             setErrorLine(null);
