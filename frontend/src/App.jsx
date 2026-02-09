@@ -165,6 +165,7 @@ function App() {
     const [selectedRunId, setSelectedRunId] = useState(null);
     const [showReportModal, setShowReportModal] = useState(false);
     const [currentReport, setCurrentReport] = useState(null);
+    const [showPackageDropdown, setShowPackageDropdown] = useState(false);
 
     const fetchIntelligence = async () => {
         try {
@@ -461,14 +462,6 @@ function App() {
             const data = await res.json();
             const pkgs = data.packages || [];
             setPackages(pkgs);
-
-            // If appId is still the default and we have packages, update it
-            setModalData(prev => {
-                if (pkgs.length > 0 && (prev.appId === 'com.hamleys_webapp' || !prev.appId)) {
-                    return { ...prev, appId: pkgs[0] };
-                }
-                return prev;
-            });
         } catch (e) {
             console.error('Fetch packages error:', e);
         }
@@ -2455,22 +2448,79 @@ function App() {
                                 <div className="form-group">
                                     <label>App Identifier</label>
                                     <div style={{ display: 'flex', gap: '8px' }}>
-                                        <select
-                                            style={{ flex: 1 }}
-                                            value={deviceConnected ? modalData.appId : ''}
-                                            onChange={(e) => setModalData({ ...modalData, appId: e.target.value })}
-                                            disabled={!deviceConnected}
-                                        >
-                                            {!deviceConnected ? (
-                                                <option value="">Device is not connected</option>
-                                            ) : packages.length > 0 ? (
-                                                packages.map(pkg => (
-                                                    <option key={pkg} value={pkg}>{pkg}</option>
-                                                ))
-                                            ) : (
-                                                <option value="com.hamleys_webapp">com.hamleys_webapp</option>
+                                        <div style={{ flex: 1, position: 'relative' }}>
+                                            <input
+                                                type="text"
+                                                placeholder={deviceConnected ? "Search or type app ID..." : "Device is not connected"}
+                                                value={modalData.appId}
+                                                onChange={(e) => {
+                                                    setModalData({ ...modalData, appId: e.target.value });
+                                                    setShowPackageDropdown(true);
+                                                }}
+                                                onFocus={() => setShowPackageDropdown(true)}
+                                                onBlur={() => setTimeout(() => setShowPackageDropdown(false), 300)}
+                                                onKeyDown={(e) => {
+                                                    if (e.key === 'Enter') {
+                                                        e.preventDefault();
+                                                        const filtered = packages.filter(pkg => pkg.toLowerCase().includes((modalData.appId || '').toLowerCase()));
+                                                        if (filtered.length > 0) {
+                                                            setModalData({ ...modalData, appId: filtered[0] });
+                                                            setShowPackageDropdown(false);
+                                                        }
+                                                    }
+                                                }}
+                                                disabled={!deviceConnected}
+                                                style={{
+                                                    width: '100%',
+                                                    padding: '8px 12px',
+                                                    background: 'rgba(0,0,0,0.3)',
+                                                    border: '1px solid var(--border)',
+                                                    borderRadius: '6px',
+                                                    color: '#fff',
+                                                    fontSize: '12px'
+                                                }}
+                                            />
+                                            {showPackageDropdown && deviceConnected && packages.length > 0 && (
+                                                <div style={{
+                                                    position: 'absolute',
+                                                    top: '100%',
+                                                    left: 0,
+                                                    right: 0,
+                                                    maxHeight: '200px',
+                                                    overflowY: 'auto',
+                                                    background: 'var(--bg-secondary)',
+                                                    border: '1px solid var(--border)',
+                                                    borderRadius: '6px',
+                                                    marginTop: '4px',
+                                                    zIndex: 1000,
+                                                    boxShadow: '0 4px 12px rgba(0,0,0,0.3)'
+                                                }} className="custom-scrollbar">
+                                                    {packages
+                                                        .filter(pkg => pkg.toLowerCase().includes((modalData.appId || '').toLowerCase()))
+                                                        .slice(0, 50)
+                                                        .map(pkg => (
+                                                            <div
+                                                                key={pkg}
+                                                                onMouseDown={() => {
+                                                                    setModalData({ ...modalData, appId: pkg });
+                                                                    setShowPackageDropdown(false);
+                                                                }}
+                                                                style={{
+                                                                    padding: '8px 12px',
+                                                                    cursor: 'pointer',
+                                                                    fontSize: '11px',
+                                                                    borderBottom: '1px solid var(--border)',
+                                                                    transition: 'background 0.2s'
+                                                                }}
+                                                                onMouseEnter={(e) => e.target.style.background = 'rgba(16, 185, 129, 0.1)'}
+                                                                onMouseLeave={(e) => e.target.style.background = 'transparent'}
+                                                            >
+                                                                {pkg}
+                                                            </div>
+                                                        ))}
+                                                </div>
                                             )}
-                                        </select>
+                                        </div>
                                         <button className="btn btn-secondary" onClick={fetchPackages} title="Refresh Packages" disabled={!deviceConnected}>🔄</button>
                                     </div>
                                 </div>
