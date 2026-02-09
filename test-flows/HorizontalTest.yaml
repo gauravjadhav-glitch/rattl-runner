@@ -1,0 +1,18 @@
+appId: com.hamleys_webapp
+---
+- launchApp:
+    clearState: true
+- tapOn: "Allow"
+- waitForAnimationToEnd
+- swipe:
+    direction: UP
+- swipe:
+    direction: UP
+- swipe:
+    direction: UP
+- swipe:
+    direction: UP
+- scroll:
+    direction: RIGHT
+- scroll:
+    direction: LEFT
