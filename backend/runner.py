@@ -1,14 +1,21 @@
+from intelligence import intelligence
+from models import TestRun, ScreenMemory, ElementMemory, ActionHistory, FailureRecord, ConfidenceMetric
+from healer import healer
 import subprocess
-import yaml
 import time
-import re
-import xml.etree.ElementTree as ET
+import hashlib
 import os
 import json
-import requests
 import base64
+import requests
+import re
+import xml.etree.ElementTree as ET
+import yaml
 
-_hierarchy_cache = {"data": None, "time": 0}
+# Global variables for current run tracking
+current_run_id = None
+
+_hierarchy_cache = {"data": None, "time": 0, "hash": None}
 
 def call_google_vision(screenshot_path, query, api_key):
     """Google Gemini Vision Implementation"""
@@ -158,9 +165,20 @@ def get_screen_size():
 
 def tap_point_percent(px_str, py_str):
     w, h = get_screen_size()
-    px = float(px_str.replace("%", "")) / 100.0
-    py = float(py_str.replace("%", "")) / 100.0
-    tap_point(int(w * px), int(h * py))
+    
+    # Handle X
+    if "%" in str(px_str):
+        x_val = float(str(px_str).replace("%", "")) / 100.0 * w
+    else:
+        x_val = float(px_str)
+        
+    # Handle Y
+    if "%" in str(py_str):
+        y_val = float(str(py_str).replace("%", "")) / 100.0 * h
+    else:
+        y_val = float(py_str)
+        
+    tap_point(int(x_val), int(y_val))
 
 def parse_bounds(bounds_str):
     # "[0,0][1080,210]"
@@ -207,17 +225,42 @@ def parse_xml_node(node):
     res["children"] = [parse_xml_node(child) for child in node]
     return res
 
+def get_screen_hash(hierarchy_data):
+    """Creates a fingerprint of the current screen structure."""
+    if not hierarchy_data: return None
+    structure = []
+    
+    if isinstance(hierarchy_data, dict):
+        def traverse_dict(n):
+            attrs = n.get("attributes", {})
+            structure.append(f"{attrs.get('class')}:{attrs.get('text')}:{attrs.get('resource-id')}")
+            for c in n.get("children", []): traverse_dict(c)
+        traverse_dict(hierarchy_data)
+    
+    full_str = "|".join(structure)
+    return hashlib.md5(full_str.encode()).hexdigest()
+
 def get_hierarchy():
     global _hierarchy_cache
     now = time.time()
     
-    if _hierarchy_cache["data"] and (now - _hierarchy_cache["time"] < 1.0):
+    if _hierarchy_cache["data"] and (now - _hierarchy_cache["time"] < 3.0):
         return _hierarchy_cache["data"]
 
+    data = None
     try:
         # 1. Native ADB dump (fast)
-        # Ensure we don't read partial data by checking return code
+        # Self-healing: kill any stuck uiautomator process first
+        run_adb("shell pkill -9 uiautomator")
+        
+        # Try native dump with timeout
         dump_proc = run_adb("shell uiautomator dump /data/local/tmp/uidump.xml")
+        
+        # If it failed, try once more after a tiny sleep
+        if dump_proc.returncode != 0:
+            time.sleep(0.5)
+            dump_proc = run_adb("shell uiautomator dump /data/local/tmp/uidump.xml")
+
         if dump_proc.returncode == 0:
             xml_res = run_adb("shell cat /data/local/tmp/uidump.xml")
             xml_data = xml_res.stdout
@@ -230,55 +273,70 @@ def get_hierarchy():
                     try:
                         root = ET.fromstring(clean_xml)
                         data = parse_xml_node(root)
-                        _hierarchy_cache = {"data": data, "time": now}
-                        return data
-                    except Exception as parse_err:
-                        print(f"[DEBUG] XML Parse error: {parse_err}")
-                else:
-                    print(f"[DEBUG] Incomplete XML structure: start={start_xml}, end={end_xml}")
-            else:
-                print(f"[DEBUG] No XML tag found in dump output")
-        else:
-            print(f"[DEBUG] ‘uiautomator dump’ failed with return code {dump_proc.returncode}")
-            
-        # 2. Fallback to maestro hierarchy
-        print("[DEBUG] Native dump failed or invalid, falling back to maestro")
-        result = subprocess.run(["maestro", "hierarchy"], capture_output=True, text=True, timeout=30, env={**os.environ, "MAESTRO_OUTPUT_NO_COLOR": "true"})
-        output = result.stdout
-        start = output.find('{')
-        end = output.rfind('}')
-        if start != -1 and end != -1:
-            data = json.loads(output[start:end+1])
-            _hierarchy_cache = {"data": data, "time": now}
+                    except: pass
+
+        if not data:
+            # 2. Fallback to maestro hierarchy
+            print("[DEBUG] Native dump failed or invalid, falling back to maestro")
+            result = subprocess.run(["maestro", "hierarchy"], capture_output=True, text=True, timeout=30, env={**os.environ, "MAESTRO_OUTPUT_NO_COLOR": "true"})
+            output = result.stdout
+            start = output.find('{')
+            end = output.rfind('}')
+            if start != -1 and end != -1:
+                data = json.loads(output[start:end+1])
+
+        if data:
+            h = get_screen_hash(data)
+            # AI Learning integration
+            intelligence.learn_screen(h, None, current_run_id or "unknown", data)
+            _hierarchy_cache = {"data": data, "time": now, "hash": h}
             return data
+
     except Exception as e:
         print(f"[ERROR] Hierarchy error: {e}")
     return {"children": []}
+
+def get_current_screen_hash():
+    """Helper to get the hash of the last captured hierarchy."""
+    return _hierarchy_cache.get("hash")
 
 
 def get_hierarchy_json():
     data = get_hierarchy()
     return json.dumps(data)
 
-def find_element(node, query):
+def find_element(node, query, index=None):
     """
     Find an element in the UI hierarchy matching the query.
-    Optimized two-pass approach:
-    1. Fast path: Look for exact clickable matches first
-    2. Slow path: Collect and score all matches if no exact clickable found
+    
+    If index is provided, returns the N-th match (0-indexed) found in the hierarchy.
+    Otherwise, returns the highest-scoring match.
     """
     if not node: return None
     
     target = str(query)
     is_regex = target.startswith("regexp:")
     
+    def is_visible(n):
+        # Check bounds
+        b = n.get("bounds")
+        # If no bounds, assume it's a container (like root) and allow children search
+        if not b: return True 
+        if b["width"] <= 0 or b["height"] <= 0: return False
+        return True
+    
     # Fast path: Try to find exact clickable match first (most common case)
-    if not is_regex:
+    # Skip fast path if index is specified, as we need to find ALL matches to correctly index them
+    if not is_regex and index is None:
         q_lower = target.lower()
         
         def find_exact_clickable(n):
             """Recursively search for exact clickable match"""
             if not n:
+                return None
+            
+            # Visibility check
+            if not is_visible(n):
                 return None
             
             attrs = n.get("attributes", {})
@@ -314,11 +372,15 @@ def find_element(node, query):
             delattr(find_exact_clickable, 'backup')
             return backup
     
-    # Slow path: Collect all matches and score them
+    # Slow path: Collect all matches and score/index them
     def collect_matches(n, matches):
         if not n:
             return
         
+        # Check visibility
+        if not is_visible(n):
+            return
+            
         attributes = n.get("attributes", {})
         text = str(attributes.get("text", ""))
         hint = str(attributes.get("hint", ""))
@@ -398,7 +460,19 @@ def find_element(node, query):
     
     if not all_matches:
         return None
-    
+
+    # Handle indexing (index-th match in hierarchy order)
+    if index is not None:
+        try:
+            # Maestro index can be string or int. 
+            idx = int(index)
+            if 0 <= idx < len(all_matches):
+                return all_matches[idx]["node"]
+            else:
+                return None # Out of bounds
+        except (ValueError, TypeError):
+            pass # Fallback to scoring if index invalid
+
     # Sort by score (highest first) and return best match
     all_matches.sort(key=lambda x: x["score"], reverse=True)
     best = all_matches[0]
@@ -409,10 +483,83 @@ def find_element(node, query):
     
     return best["node"]
 
-def get_center(bounds_str):
-    # "[0,0][1080,210]"
+def find_fuzzy_successor(root, query, cached_data):
+    """
+    HEALING LOGIC: If a query fails but we have cached coordinates,
+    look for the most similar element at or near those coordinates.
+    """
+    if not cached_data: return None
+    
+    target_bounds = cached_data.get("bounds")
+    if not target_bounds: return None
+    
+    cx = (target_bounds["left"] + target_bounds["right"]) // 2
+    cy = (target_bounds["top"] + target_bounds["bottom"]) // 2
+    
+    best_candidate = None
+    min_dist = 200 # Max 200px drift allowed for auto-healing
+    
+    def search(n):
+        nonlocal best_candidate, min_dist
+        if not n: return
+        
+        attrs = n.get("attributes", {})
+        bounds = attrs.get("bounds")
+        
+        if bounds:
+            ncx = (bounds["left"] + bounds["right"]) // 2
+            ncy = (bounds["top"] + bounds["bottom"]) // 2
+            dist = ((cx - ncx)**2 + (cy - ncy)**2)**0.5
+            
+            if dist < min_dist:
+                # Check for semantic similarity
+                score = 0
+                if attrs.get("class") == cached_data.get("class"): score += 1
+                if attrs.get("clickable") == "true": score += 1
+                
+                # If it's close and looks like a button/input, it's a candidate
+                if score >= 1:
+                    min_dist = dist
+                    best_candidate = n
+        
+        for child in n.get("children", []):
+            search(child)
+            
+    search(root)
+    return best_candidate
+
+def analyze_failure(root, query, screen_hash):
+    """
+    REASONING ENGINE: Why did it fail? 
+    Compares current state vs knowledge base.
+    """
+    cached = intelligence.get_element_memory(screen_hash, query)
+    if not cached:
+         return "Element never seen before on this screen. Is the locator correct?"
+    
+    # Check if a similar element exists elsewhere
+    other_match = find_element(root, query)
+    if other_match:
+        return f"Element '{query}' moved! It used to be at {cached['bounds']}, but now it's at {other_match['attributes']['bounds']}."
+
+    return f"Element '{query}' has disappeared from screen '{screen_hash}'. The UI structure may have changed significantly."
+
+def get_center(bounds):
+    """
+    Calculate center of bounds. Handles both:
+    1. String: "[0,0][1080,210]"
+    2. Dict: {'left': 0, 'top': 0, 'right': 1080, 'bottom': 210, 'width': 1080, 'height': 210}
+    """
+    if not bounds: return None
+    
+    if isinstance(bounds, dict):
+        x1, y1 = bounds.get("left", 0), bounds.get("top", 0)
+        x2, y2 = bounds.get("right", 0), bounds.get("bottom", 0)
+        return (x1 + x2) // 2, (y1 + y2) // 2
+
+    # String format
     try:
-        match = re.search(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds_str)
+        match = re.search(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", str(bounds))
         if match:
             x1, y1, x2, y2 = map(int, match.groups())
             return (x1 + x2) // 2, (y1 + y2) // 2
@@ -420,8 +567,56 @@ def get_center(bounds_str):
         pass
     return None
 
+def perform_tap_id_only(resource_id):
+    """
+    Perform a tap on an element identified by its resource-id.
+    This helper is used for fast-path permission dialog handling.
+    """
+    print(f"[DEBUG] Attempting tap on ID: {resource_id}")
+    root = get_hierarchy()
+    el = find_element(root, resource_id)
+    if el:
+        attrs = el.get("attributes", {})
+        bounds = attrs.get("bounds", "")
+        # Get center returns tuple (cx, cy) or None
+        center = get_center(bounds)
+        if center:
+            cx, cy = center
+            run_adb(f"shell input tap {cx} {cy}")
+            return True
+        else:
+            print(f"[DEBUG] ID '{resource_id}' found but no valid bounds: {bounds}")
+    else:
+        print(f"[DEBUG] ID '{resource_id}' not found in current hierarchy")
+    return False
+
+def perform_tap_text_only(text, root=None):
+    """
+    Perform a tap on an element identified by its text.
+    """
+    print(f"[DEBUG] Attempting tap on Text: {text}")
+    if not root:
+        root = get_hierarchy()
+    el = find_element(root, text)
+    if el:
+        attrs = el.get("attributes", {})
+        bounds = attrs.get("bounds", "")
+        center = get_center(bounds)
+        if center:
+            cx, cy = center
+            run_adb(f"shell input tap {cx} {cy}")
+            return True
+    return False
+
 def input_text(text):
-    # Escape spaces
+    # Ensure it is a string if it came from a dict parameter
+    if isinstance(text, dict):
+        # Extract text if parameter was a dict like {text: "...", index: ...}
+        text = text.get("text", str(text))
+    else:
+        text = str(text)
+        
+    # Escape spaces for ADB input
     escaped = text.replace(" ", "%s")
     run_adb(f"shell input text {escaped}")
 
@@ -443,11 +638,24 @@ class StepData:
             self.params = step[self.type]
 
 def resolve_query(params):
+    if params is None: return None
     if isinstance(params, str): return params
+    if not isinstance(params, dict): return str(params)
     if "point" in params: return None
-    # simplify: first text key or id
-    clean = {k:v for k,v in params.items() if k not in ["timeout", "optional"]}
-    if clean: return next(iter(clean.values()))
+    
+    # Prioritize common Maestro-style keys
+    for key in ["id", "resourceId", "text", "contentDescription", "accessibilityId", "label", "hint"]:
+        if key in params:
+            val = str(params[key])
+            # Auto-detect regex for IDs/resourceIds if they contain regex special chars
+            if key in ["id", "resourceId"] and not val.startswith("regexp:"):
+                if any(c in val for c in [".*", "+", "^", "$", "|"]):
+                    return f"regexp:{val}"
+            return val
+            
+    # Fallback to any value that isn't a known metadata key
+    clean = {k:v for k,v in params.items() if k not in ["timeout", "optional", "index", "point", "longPress"]}
+    if clean: return str(next(iter(clean.values())))
     return None
 
 def retry_operation(operation_func, max_retries=3, retry_delay=1.0, operation_name="operation"):
@@ -487,32 +695,190 @@ def retry_operation(operation_func, max_retries=3, retry_delay=1.0, operation_na
     # All retries exhausted
     raise last_exception
 
-def wait_for_element_or_fail(query, timeout=10):
-    start = time.time()
-    print(f"[DEBUG] Waiting for element: {query} (timeout {timeout}s)")
-    while time.time() - start < timeout:
-        root = get_hierarchy()
-        if not root:
-             print("[DEBUG] Hierarchy is None")
-             time.sleep(0.5)
-             continue
-             
-        el = find_element(root, query)
-        if el: 
-            print(f"[DEBUG] Element found: {query}")
-            return el
-        
-        print(f"[DEBUG] Element '{query}' not found... retrying")
-        time.sleep(0.5)
+def wait_for_element_or_fail(query, timeout=10, step_context=None, index=None):
+    # Requirement: Wait up to 10s. If not found, retry for another 10s.
+    # We enforce a minimum of 10s per attempt unless a specific long timeout was requested.
+    phase_timeout = max(timeout, 10)
     
-    # Timeout -> Fail
-    print(f"[DEBUG] FAIL: Element not found: {query}")
-    take_screenshot("failure_timeout")
-    raise Exception(f"Element not found: {query} (timeout {timeout}s)")
+    # 1. Try to recall from knowledge first (Instant check)
+    # Skip recall if index is used (recall currently optimized for "best" match)
+    if index is None:
+        last_hash = get_current_screen_hash()
+        cached = intelligence.get_element_memory(last_hash, query)
+        if cached:
+            print(f"[DEBUG] Learner: Recalled '{query}' from previous run knowledge.")
+            if step_context:
+                 intelligence.save_step_memory(step_context[0], step_context[1], cached["bounds"])
+            return {"bounds": cached["bounds"], "attributes": {"bounds": cached["bounds"], "recalled": True}}
 
-def run_test_step(step):
+    # Two attempts: Initial (10s) + Retry (10s)
+    for attempt in range(1, 3):
+        start = time.time()
+        msg = f"{query}[{index}]" if index is not None else query
+        print(f"[DEBUG] Waiting for element: {msg} (Attempt {attempt}/2, timeout {phase_timeout}s)")
+        
+        while time.time() - start < phase_timeout:
+            root = get_hierarchy()
+            if not root:
+                 print("[DEBUG] Hierarchy is None")
+                 time.sleep(0.3)
+                 continue
+                 
+            # Detect screen hash
+            current_hash = get_current_screen_hash()
+            
+            # Check cache again if screen changed (and no index)
+            if index is None:
+                cached = intelligence.get_element_memory(current_hash, query)
+                if cached:
+                    print(f"[DEBUG] Learner: Identified screen '{current_hash}'. Recalling '{query}'.")
+                    if step_context:
+                         intelligence.save_step_memory(step_context[0], step_context[1], cached["bounds"])
+                    return {"bounds": cached["bounds"], "attributes": {"bounds": cached["bounds"], "recalled": True}}
+
+            el = find_element(root, query, index=index)
+            if el:
+                # Visibility check: Ensure bounds are valid and interactive
+                bounds = el.get("bounds") # Use the parsed bounds object, not the raw string
+                # Basic visibility check
+                if bounds and bounds.get("width", 0) > 0 and bounds.get("height", 0) > 0:
+                     print(f"[DEBUG] Found '{msg}' in {time.time() - start:.2f}s")
+                     if index is None: # Only remember interactions for unique/best elements
+                         intelligence.remember_interaction(current_hash, query, el, success=True)
+                     if step_context:
+                          intelligence.save_step_memory(step_context[0], step_context[1], bounds)
+                     return el
+                else:
+                     print(f"[DEBUG] Found '{msg}' but it is not visible/interactive. Continuing search...")
+            
+            # SELF-HEALING: Try fuzzy matching (only if no index)
+            if index is None:
+                cached = intelligence.get_element_memory(current_hash, query)
+                if cached:
+                    healed_el = find_fuzzy_successor(root, query, cached)
+                    if healed_el:
+                        print(f"[DEBUG] 🛠 SELF-HEALED: Exact match for '{query}' failed, but found a similar element.")
+                        intelligence.increment_healed()
+                        intelligence.remember_interaction(current_hash, query, healed_el, success=True)
+                        if step_context:
+                             intelligence.save_step_memory(step_context[0], step_context[1], healed_el["attributes"]["bounds"])
+                        return healed_el
+
+            time.sleep(0.3)
+        
+        if attempt == 1:
+            print(f"[DEBUG] Element '{msg}' not found in first {phase_timeout}s. RETRYING...")
+            time.sleep(0.5)
+
+    # Timeout -> Fail
+    current_hash = get_current_screen_hash()
+    reason = analyze_failure(get_hierarchy(), query, current_hash)
+    if index is None:
+        intelligence.remember_interaction(current_hash, query, {}, success=False)
+    print(f"[DEBUG] FAIL: {reason}")
+    take_screenshot("failure_timeout")
+    raise Exception(f"Element not found: {query} (index: {index}) after {phase_timeout*2}s. Analysis: {reason}")
+
+def run_test_step(step, run_id=None, step_index=None):
+    """Wrapper for intelligence and failure handling around step execution."""
+    start_time = time.time()
     s = StepData(step)
+    intent = str(step)
+    action_type = s.type
+
+    # Determine Intelligence Mode
+    mode = "LEARN"
+    test_name = None
+    if run_id:
+        for r in intelligence.raw_data["runs"]:
+             if r["run_id"] == run_id: 
+                 mode = r.get("mode", "LEARN")
+                 test_name = r.get("test_name")
+                 break
     
+    step_context = (test_name, step_index) if test_name and step_index is not None else None
+
+    # FAST MODE: Predict and Optimize
+    if mode == "FAST" and step_context and s.type == "tapOn":
+        # Check if we have a memory for this step
+        mem = intelligence.get_step_memory(*step_context)
+        if mem:
+            print(f"[FAST] Recalled step memory: {mem['bounds']}")
+            cx, cy = get_center(mem['bounds'])
+            if cx:
+                # OPTIMIZATION: Rewrite step to use point directly!
+                # This bypasses hierarchy dump and search entirely.
+                if isinstance(s.params, str): # "Search"
+                    s.params = {"point": f"{cx},{cy}", "original": s.params}
+                elif isinstance(s.params, dict) and "point" not in s.params:
+                    s.params["point"] = f"{cx},{cy}"
+                print(f"[FAST] Optimized to tap point {cx},{cy}")
+
+    
+    # Track current state before action
+    # OPTIMIZATION: In FAST mode, skip initial hierarchy dump unless we fail
+    root = None
+    current_hash = "FAST_MODE_SKIP"
+    
+    should_capture_state = True
+    if mode == "FAST": should_capture_state = False
+
+    if should_capture_state:
+        root = get_hierarchy()
+        current_hash = get_screen_hash(root)
+    
+    attempts = 0
+    max_attempts = 2  # 1 regular + 1 retry if healed
+
+    while attempts < max_attempts:
+        try:
+            result = _dispatch_step_logic(s, step_context)
+            
+            # Record Success
+            duration = int((time.time() - start_time) * 1000)
+            if run_id:
+                intelligence.record_action(run_id, action_type, intent, "SUCCESS", duration)
+                
+            return result
+
+        except Exception as e:
+            attempts += 1
+            duration = int((time.time() - start_time) * 1000)
+            error_msg = str(e)
+            
+            # Record Failure & Analyze
+            analysis = None
+            if run_id:
+                intelligence.record_action(run_id, action_type, intent, "FAIL", duration)
+                analysis = healer.analyze_failure(
+                    run_id, 
+                    {"intent": intent, "type": action_type}, 
+                    error_msg, 
+                    {"ui_hash": current_hash or "unknown", "hierarchy": root or {}}
+                )
+            
+            # HEALING LOGIC: Can we retry?
+            if attempts < max_attempts and analysis and analysis.get("healed"):
+                fix = analysis.get("suggested_fix")
+                if fix:
+                    print(f"[HEALER] Attempting auto-fix: {fix['value']}")
+                    # Update step data for retry
+                    if fix['type'] == 'text':
+                        if isinstance(s.params, dict): s.params['text'] = fix['value']
+                        else: s.params = fix['value']
+                    elif fix['type'] == 'resource_id':
+                        if isinstance(s.params, dict): s.params['id'] = fix['value']
+                        else: s.params = f"id:{fix['value']}"
+                    
+                    # Refresh hierarchy before retry to be sure
+                    root = get_hierarchy()
+                    current_hash = get_screen_hash(root)
+                    continue
+
+            raise e
+
+def _dispatch_step_logic(s, step_context=None):
+    """The core Maestro command dispatcher."""
     if s.type == "launchApp":
         if isinstance(s.params, str):
             app_id = s.params
@@ -545,31 +911,76 @@ def run_test_step(step):
         
         # Handle coordinate tap immediately (FAST PATH)
         if isinstance(s.params, dict) and "point" in s.params:
-            px_str, py_str = str(s.params["point"]).split(",")
+            pt = str(s.params["point"])
+            if "," in pt:
+                px_str, py_str = pt.split(",")
+            else:
+                # Handle possible YAML parsing artifact where {point: 90%, 9%} 
+                # might result in 'point' being '90%' and others as keys
+                px_str = pt
+                py_str = None
+                for k in s.params:
+                    if k != "point":
+                        py_str = str(k)
+                        break
+                if not py_str:
+                     raise Exception(f"Invalid point format: {pt}")
+            
             tap_point_percent(px_str, py_str)
             return f"Tap Point: {px_str},{py_str}"
             
         query = resolve_query(s.params)
+        index = s.params.get("index") if isinstance(s.params, dict) else None
         
         def perform_tap():
-            el = wait_for_element_or_fail(query, timeout=timeout)
-            if el and "bounds" in el.get("attributes", {}):
-                attrs = el.get("attributes", {})
-                is_enabled = attrs.get("enabled", "true")
-                if isinstance(is_enabled, str):
-                    is_enabled = is_enabled.lower() == "true"
-                if not is_enabled:
-                    raise Exception(f"Element '{query}' found but is DISABLED (not clickable)")
-                cx, cy = get_center(attrs["bounds"])
-                if cx:
-                    run_adb(f"shell input tap {cx} {cy}")
-                    return f"Tap '{query}'"
-            raise Exception(f"Element found but no bounds: {query}")
-        
+            # Regular Search - wait_for_element_or_fail already handles retries/wait/visibility
+            el = wait_for_element_or_fail(query, timeout=timeout, step_context=step_context, index=index)
+            
+            # Extract bounds
+            attrs = el.get("attributes", {})
+            bounds = attrs.get("bounds")
+            
+            # Use center coordinates
+            cx, cy = get_center(bounds)
+            if cx:
+                run_adb(f"shell input tap {cx} {cy}")
+                return f"Tap '{query}'" + (f" [{index}]" if index is not None else "")
+            
+            raise Exception(f"Element found but no valid center for bounds: {query}")
+
         try:
-            return retry_operation(perform_tap, max_retries=2, retry_delay=0.3, operation_name=f"Tap '{query}'")
+            return retry_operation(perform_tap, max_retries=5, retry_delay=1.0, operation_name=f"Tap '{query}'")
         except Exception as e:
             if is_optional: return f"Skip optional tap: '{query}'"
+            
+            # Special handling for "Allow" (Permission Dialogs)
+            # FAST PATH: Check common IDs immediately if query is broadly "allow"
+            if "allow" in query.lower():
+                print("[DEBUG] Permission dialog suspected. Checking common IDs...")
+                permission_ids = [
+                    "com.android.permissioncontroller:id/permission_allow_button",
+                    "com.android.permissioncontroller:id/permission_allow_foreground_only_button",
+                    "com.android.packageinstaller:id/permission_allow_button",
+                    "com.android.permissioncontroller:id/permission_allow_one_time_button",
+                    "android:id/button1"
+                ]
+                
+                # Try IDs first (faster than hierarchy text scan)
+                for pid in permission_ids:
+                    try:
+                        # Quick check if ID exists in current hierarchy (optimization)
+                        if perform_tap_id_only(pid):
+                             return f"Tap Permission Allow (via ID fast-path)"
+                    except:
+                        continue
+                        
+                # Then try text variations
+                extra_queries = ["ALLOW", "While using the app", "Only this time"]
+                root = get_hierarchy()
+                for eq in extra_queries:
+                     if perform_tap_text_only(eq, root):
+                         return f"Tap '{eq}' (via variation fallback)"
+
             api_key = os.getenv("RATT_OPENAI_KEY") or os.getenv("OPENAI_API_KEY")
             if api_key:
                 snap_path = take_screenshot("vision_check")
@@ -581,10 +992,12 @@ def run_test_step(step):
 
     elif s.type == "assertVisible":
         query = resolve_query(s.params)
+        index = s.params.get("index") if isinstance(s.params, dict) else None
+        timeout = s.params.get("timeout", 50) if isinstance(s.params, dict) else 50
         
         def perform_assert():
-            wait_for_element_or_fail(query, timeout=50)
-            return f"Assert Valid: '{query}'"
+            wait_for_element_or_fail(query, timeout=timeout, step_context=step_context, index=index)
+            return f"Assert Valid: '{query}'" + (f" [{index}]" if index is not None else "")
         
         # Retry assertion up to 3 times
         return retry_operation(perform_assert, max_retries=3, retry_delay=0.5, operation_name=f"Assert '{query}'")
@@ -592,13 +1005,70 @@ def run_test_step(step):
     elif s.type == "assertNotVisible":
         query = resolve_query(s.params)
         # Quick check, no wait needed usually, or short wait to ensure animation finished?
-        # Maestro default: if found -> fail.
         root = get_hierarchy()
         el = find_element(root, query)
         if el:
             take_screenshot("failure_visible")
             raise Exception(f"Element should NOT be visible: {query}")
         return f"Assert Not Visible: '{query}'"
+
+    elif s.type == "back":
+        run_adb("shell input keyevent 4")
+        return "Pressed Back"
+
+    elif s.type == "stopApp" or s.type == "killApp":
+        app_id = s.params
+        if isinstance(s.params, dict):
+             app_id = s.params.get("appId")
+        run_adb(f"shell am force-stop {app_id}")
+        return f"stopped App {app_id}"
+
+    elif s.type == "openLink":
+        link = s.params
+        if isinstance(s.params, dict):
+             link = s.params.get("link")
+        run_adb(f"shell am start -a android.intent.action.VIEW -d {link}")
+        return f"Open Link {link}"
+        
+    elif s.type == "eraseText":
+        chars = 50
+        if isinstance(s.params, int):
+             chars = s.params
+        elif isinstance(s.params, dict) and "characters" in s.params:
+             chars = s.params["characters"]
+        
+        # Send Backspace N times
+        cmd = "test" # dummy
+        # Use a loop or multiple events
+        # 'input keyevent 67 67 ...'
+        events = " ".join(["67"] * chars)
+        # If too long, split
+        run_adb(f"shell input keyevent {events}")
+        return f"Erased {chars} chars"
+
+    elif s.type == "doubleTapOn":
+        # Similar to tapOn but twice
+        query = resolve_query(s.params)
+        el = wait_for_element_or_fail(query, timeout=5)
+        attrs = el.get("attributes", {})
+        cx, cy = get_center(attrs["bounds"])
+        if cx:
+            run_adb(f"shell input tap {cx} {cy}")
+            time.sleep(0.1)
+            run_adb(f"shell input tap {cx} {cy}")
+            return f"Double Tap '{query}'"
+        raise Exception(f"No bounds for {query}")
+
+    elif s.type == "longPressOn":
+         # input swipe x y x y duration
+         query = resolve_query(s.params)
+         el = wait_for_element_or_fail(query, timeout=5)
+         attrs = el.get("attributes", {})
+         cx, cy = get_center(attrs["bounds"])
+         if cx:
+             run_adb(f"shell input swipe {cx} {cy} {cx} {cy} 1000")
+             return f"Long Press '{query}'"
+         raise Exception(f"No bounds for {query}")
 
     elif s.type == "inputText":
         input_text(s.params)
@@ -612,48 +1082,155 @@ def run_test_step(step):
         run_adb(f"shell input keyevent {code}")
         return f"Key: {key}"
 
+    elif s.type == "hideKeyboard":
+        # Key event 111 is ESCAPE, often closes keyboard. 
+        # Alternatively 4 (BACK) but that might navigate if no keyboard.
+        # Let's try 111 first, or we can use 'input method hide' if available?
+        # Safe bet: keyevent 111
+        run_adb("shell input keyevent 111")
+        time.sleep(0.5)
+        return "Hide Keyboard"
+
     elif s.type == "scroll":
         direction = "DOWN"
+        query = None
         if isinstance(s.params, dict):
             direction = s.params.get("direction", "DOWN")
+            query = resolve_query(s.params.get("element"))
         
         w, h = get_screen_size()
-        cx = w // 2
         
-        # Scroll DOWN means content moves up, so we swipe UP (Bottom -> Top)
+        # If element is provided, scroll within its center
+        if query:
+            root = get_hierarchy()
+            el = find_element(root, query)
+            if el:
+                bounds = el.get("bounds")
+                cx = (bounds["left"] + bounds["right"]) // 2
+                cy = (bounds["top"] + bounds["bottom"]) // 2
+                # Use a larger distance to ensure content moves (60% of element)
+                dist_h = int(bounds["width"] * 0.3)
+                dist_v = int(bounds["height"] * 0.3)
+                
+                if direction == "DOWN":
+                    run_adb(f"shell input swipe {cx} {cy + dist_v} {cx} {cy - dist_v} 1000")
+                elif direction == "UP":
+                    run_adb(f"shell input swipe {cx} {cy - dist_v} {cx} {cy + dist_v} 1000")
+                elif direction == "RIGHT":
+                    run_adb(f"shell input swipe {cx + dist_h} {cy} {cx - dist_h} {cy} 1000")
+                elif direction == "LEFT":
+                    run_adb(f"shell input swipe {cx - dist_h} {cy} {cx + dist_h} {cy} 1000")
+                return f"Scroll {direction} on '{query}'"
+
+        # Global scroll
+        cx, cy = w // 2, h // 2
         if direction == "DOWN":
-            start_y = int(h * 0.7)
-            end_y = int(h * 0.3)
-            run_adb(f"shell input swipe {cx} {start_y} {cx} {end_y} 1000")
-        # Scroll UP means content moves down, so we swipe DOWN (Top -> Bottom)
+            run_adb(f"shell input swipe {cx} {int(h * 0.8)} {cx} {int(h * 0.2)} 1000")
         elif direction == "UP":
-            start_y = int(h * 0.3)
-            end_y = int(h * 0.7)
-            run_adb(f"shell input swipe {cx} {start_y} {cx} {end_y} 1000")
+            run_adb(f"shell input swipe {cx} {int(h * 0.2)} {cx} {int(h * 0.8)} 1000")
+        elif direction == "RIGHT":
+            run_adb(f"shell input swipe {int(w * 0.8)} {cy} {int(w * 0.2)} {cy} 1000")
+        elif direction == "LEFT":
+            run_adb(f"shell input swipe {int(w * 0.2)} {cy} {int(w * 0.8)} {cy} 1000")
             
         return f"Scroll {direction}"
 
-    elif s.type == "swipe":
-        direction = None
+    elif s.type == "scrollUntilVisible":
         if isinstance(s.params, dict):
-            direction = s.params.get("direction")
+             target_query = s.params.get("element")
+             # Handle nested map if element is complex or just string
+             if isinstance(target_query, dict):
+                 # e.g. element: { text: "Foo" } -> resolve
+                 query = resolve_query(target_query)
+             else:
+                 query = target_query
+                 
+             direction = s.params.get("direction", "DOWN")
+        else:
+             query = s.params
+             direction = "DOWN"
         
-        if direction:
-             w, h = get_screen_size()
-             cx = w // 2
-             cy = h // 2
+        print(f"[DEBUG] Scroll {direction} until '{query}' visible")
+        
+        max_scrolls = 15
+        found = False
+        
+        for i in range(max_scrolls):
+            # Check visibility
+            root = get_hierarchy()
+            if find_element(root, query):
+                found = True
+                break
+            
+            # Not found, scroll
+            w, h = get_screen_size()
+            cx = w // 2
+            
+            # Scroll behavior
+            if direction == "DOWN":
+                # Scroll DOWN content = Swipe UP
+                run_adb(f"shell input swipe {cx} {int(h * 0.8)} {cx} {int(h * 0.2)} 1000")
+            elif direction == "UP":
+                # Scroll UP content = Swipe DOWN
+                run_adb(f"shell input swipe {cx} {int(h * 0.2)} {cx} {int(h * 0.8)} 1000")
+            elif direction == "RIGHT":
+                # Scroll RIGHT content = Swipe LEFT
+                run_adb(f"shell input swipe {int(w * 0.8)} {cy} {int(w * 0.2)} {cy} 1000")
+            elif direction == "LEFT":
+                # Scroll LEFT content = Swipe RIGHT
+                run_adb(f"shell input swipe {int(w * 0.2)} {cy} {int(w * 0.8)} {cy} 1000")
+            
+            time.sleep(1.0) # Wait for scroll to settle
+            
+        if not found:
+             raise Exception(f"Element '{query}' not found after scrolling {direction} {max_scrolls} times")
              
-             if direction == "LEFT":
-                 run_adb(f"shell input swipe {int(w*0.8)} {cy} {int(w*0.2)} {cy} 500")
-             elif direction == "RIGHT":
-                 run_adb(f"shell input swipe {int(w*0.2)} {cy} {int(w*0.8)} {cy} 500")
-             elif direction == "DOWN":
-                 run_adb(f"shell input swipe {cx} {int(h*0.2)} {cx} {int(h*0.8)} 500")
-             elif direction == "UP":
-                 run_adb(f"shell input swipe {cx} {int(h*0.8)} {cx} {int(h*0.2)} 500")
-             return f"Swipe {direction}"
+        return f"Scrolled {direction} to find '{query}'"
+
+    elif s.type == "swipe":
+        direction = "LEFT"
+        duration = 500
+        query = None
         
-        return "Swipe (Custom coordinates not implemented)"
+        if isinstance(s.params, dict):
+            direction = s.params.get("direction", "LEFT")
+            duration = s.params.get("duration", 500)
+            query = resolve_query(s.params.get("element"))
+        
+        w, h = get_screen_size()
+        
+        # If element is provided, swipe within element bounds
+        if query:
+            root = get_hierarchy()
+            el = find_element(root, query)
+            if not el:
+                raise Exception(f"Swipe failed: Element '{query}' not found")
+            
+            bounds = el.get("bounds")
+            cx, cy = (bounds["left"] + bounds["right"]) // 2, (bounds["top"] + bounds["bottom"]) // 2
+            width, height = bounds["width"], bounds["height"]
+            
+            if direction == "LEFT":
+                run_adb(f"shell input swipe {int(cx + width*0.3)} {cy} {int(cx - width*0.3)} {cy} {duration}")
+            elif direction == "RIGHT":
+                run_adb(f"shell input swipe {int(cx - width*0.3)} {cy} {int(cx + width*0.3)} {cy} {duration}")
+            elif direction == "DOWN":
+                run_adb(f"shell input swipe {cx} {int(cy - height*0.3)} {cx} {int(cy + height*0.3)} {duration}")
+            elif direction == "UP":
+                run_adb(f"shell input swipe {cx} {int(cy + height*0.3)} {cx} {int(cy - height*0.3)} {duration}")
+        else:
+            # Global swipe (centered)
+            cx, cy = w // 2, h // 2
+            if direction == "LEFT":
+                run_adb(f"shell input swipe {int(w*0.7)} {cy} {int(w*0.3)} {cy} {duration}")
+            elif direction == "RIGHT":
+                run_adb(f"shell input swipe {int(w*0.3)} {cy} {int(w*0.7)} {cy} {duration}")
+            elif direction == "DOWN":
+                run_adb(f"shell input swipe {cx} {int(h*0.3)} {cx} {int(h*0.7)} {duration}")
+            elif direction == "UP":
+                run_adb(f"shell input swipe {cx} {int(h*0.7)} {cx} {int(h*0.3)} {duration}")
+        
+        return f"Swipe {direction}"
 
     elif s.type == "wait":
         # Wait for specified milliseconds
@@ -663,49 +1240,59 @@ def run_test_step(step):
         return f"Wait {duration_ms}ms"
 
     elif s.type == "waitForAnimationToEnd":
-        time.sleep(0.5)
-        return "Wait animation"
-        
+        # Rough approximation: wait for UI to settle
+        time.sleep(10.0)
+        return "Wait animation to end (10s)"
+
+
     elif s.type == "extendedWaitUntil":
         # Check if awaiting visibility or not visibility
-        timeout = s.params.get("timeout", 5000) / 1000
-        if "visible" in s.params:
-            query = resolve_query(s.params["visible"])
-            wait_for_element_or_fail(query, timeout)
+        timeout_ms = s.params.get("timeout", 5000)
+        timeout_s = timeout_ms / 1000
+        
+        # Determine query from berbagai possible keys (visible, assertVisible, etc.)
+        target = s.params.get("visible") or s.params.get("assertVisible")
+        if target:
+            query = resolve_query(target)
+            index = target.get("index") if isinstance(target, dict) else None
+            wait_for_element_or_fail(query, timeout=timeout_s, step_context=step_context, index=index)
             return f"Wait until visible: {query}"
-        elif "notVisible" in s.params:
-             query = resolve_query(s.params["notVisible"])
-             start = time.time()
-             while time.time() - start < timeout:
-                 root = get_hierarchy()
-                 if not find_element(root, query):
-                     return f"Wait until not visible: {query}"
-                 time.sleep(2.0)
-             raise Exception(f"Element still visible: {query}")
+            
+        target_not = s.params.get("notVisible") or s.params.get("assertNotVisible")
+        if target_not:
+            query = resolve_query(target_not)
+            index = target_not.get("index") if isinstance(target_not, dict) else None
+            start = time.time()
+            while time.time() - start < timeout_s:
+                root = get_hierarchy()
+                if not find_element(root, query, index=index):
+                    return f"Wait until not visible: {query}"
+                time.sleep(0.5)
+            raise Exception(f"Element still visible after {timeout_s}s: {query}")
              
-        time.sleep(timeout)
-        return f"Sleep {timeout}s"
+        time.sleep(timeout_s)
+        return f"Wait {timeout_ms}ms"
         
     return f"Skipped {s.type}"
 
-def execute_flow(flow, global_app_id):
+def execute_flow(flow, global_app_id, run_id=None):
     for i, step in enumerate(flow):
-        # Inject appId
-        if "launchApp" in step:
-                if isinstance(step["launchApp"], dict) and "appId" not in step["launchApp"] and global_app_id:
-                    step["launchApp"]["appId"] = global_app_id
+        # Inject appId if needed
+        if isinstance(step, dict) and "launchApp" in step:
+            if isinstance(step["launchApp"], dict) and "appId" not in step["launchApp"] and global_app_id:
+                step["launchApp"]["appId"] = global_app_id
 
         
         try:
             # Send 'running' status before starting the step
             yield f"data: [{i+1}/{len(flow)}] step (running)\n\n"
-            log = run_test_step(step)
+            log = run_test_step(step, run_id=run_id, step_index=i)
             yield f"data: [{i+1}/{len(flow)}] {log} (completed)\n\n"
         except Exception as e:
             yield f"data: [{i+1}/{len(flow)}] {str(e)} (failed)\n\n"
             raise e
 
-def run_yaml_custom(yaml_content, api_key=None):
+def run_yaml_custom(yaml_content, api_key=None, filename=""):
     # Set key for this run
     if api_key:
         os.environ["RATT_OPENAI_KEY"] = api_key
@@ -719,13 +1306,43 @@ def run_yaml_custom(yaml_content, api_key=None):
         
         global_app_id = header.get("appId") if isinstance(header, dict) else None
         
+        # AI RUN TRACKING: Start Run
+        # Use filename (without .yaml) if no name in header
+        if filename and filename.endswith('.yaml'):
+            default_name = filename[:-5]  # Remove .yaml extension
+        else:
+            default_name = filename if filename else "Unnamed Test"
+        
+        run_name = header.get("name", default_name)
+        
+        # Determine mode based on history
+        mode = "LEARN"
+        for r in sorted(intelligence.raw_data["runs"], key=lambda x: str(x.get("started_at", "")), reverse=True):
+             if r.get("test_name") == run_name and r.get("status") == "PASS":
+                 mode = "FAST"
+                 break
+                 
+        run_id = intelligence.start_run(run_name, mode=mode)
+        global current_run_id
+        current_run_id = run_id
+        start_time = time.time()
+        
         try:
-            for msg in execute_flow(flow, global_app_id):
+            for msg in execute_flow(flow, global_app_id, run_id=run_id):
                 yield msg
+            
+            # AI RUN TRACKING: End Run (Pass)
+            duration = int((time.time() - start_time) * 1000)
+            intelligence.end_run(run_id, "PASS", duration)
             yield f"data: [DONE] EXIT_CODE: 0\n\n"
-        except:
-            yield f"data: [ERROR] Test stopped due to failure.\n\n"
+            yield f"data: [REPORT] Run ID: {run_id}\n\n"
+        except Exception as e:
+            # AI RUN TRACKING: End Run (Fail)
+            duration = int((time.time() - start_time) * 1000)
+            intelligence.end_run(run_id, "FAIL", duration)
+            yield f"data: [ERROR] {str(e)}\n\n"
             yield f"data: [DONE] EXIT_CODE: 1\n\n"
+            yield f"data: [REPORT] Run ID: {run_id}\n\n"
         
     except Exception as e:
         yield f"data: [ERROR] {str(e)}\n\n"

@@ -159,6 +159,20 @@ function App() {
     const [isEditingUrl, setIsEditingUrl] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
     const [apiKey, setApiKey] = useState(localStorage.getItem('openai_api_key') || '');
+    const [aiPrompt, setAiPrompt] = useState('');
+    const [agentIntelligence, setAgentIntelligence] = useState(null);
+    const [activeTab, setActiveTab] = useState('inspector');
+    const [selectedRunId, setSelectedRunId] = useState(null);
+    const [showReportModal, setShowReportModal] = useState(false);
+    const [currentReport, setCurrentReport] = useState(null);
+
+    const fetchIntelligence = async () => {
+        try {
+            const res = await fetch(`${apiBaseUrl}/api/intelligence/stats`);
+            const data = await res.json();
+            setAgentIntelligence(data);
+        } catch (e) { console.error(e); }
+    };
 
     // Custom Modal States
     const [fileToDelete, setFileToDelete] = useState(null);
@@ -560,6 +574,14 @@ function App() {
         }
     }, [activeTerminalTab]);
 
+    useEffect(() => {
+        if (activeTab === 'intelligence') {
+            fetchIntelligence();
+            const interval = setInterval(fetchIntelligence, 5000);
+            return () => clearInterval(interval);
+        }
+    }, [activeTab]);
+
     const executeCommand = async (cmd) => {
         if (!cmd) return;
 
@@ -868,9 +890,9 @@ function App() {
     const stopTest = () => {
         if (abortControllerRef.current) {
             abortControllerRef.current.abort();
-            addLog('error', 'Test Stopped by User');
-            setIsRunning(false);
         }
+        addLog('error', 'Test Stopped by User');
+        setIsRunning(false);
     };
 
     const runStep = async (step) => {
@@ -961,7 +983,8 @@ function App() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     yaml_content: editorContent,
-                    apiKey: apiKey // Pass the stored key
+                    apiKey: apiKey, // Pass the stored key
+                    filename: currentFile.name // Pass the filename
                 }),
                 signal: abortControllerRef.current.signal
             });
@@ -1405,14 +1428,16 @@ function App() {
                 const hierarchyStr = JSON.stringify(hierarchy || {});
 
                 // 3. Context
-                const elementCtx = selectedElement.isPoint
+                const elementCtx = (selectedElement && selectedElement.isPoint)
                     ? `User clicked point at ${Math.round(popupPosition?.x || 0)}%, ${Math.round(popupPosition?.y || 0)}%`
                     : `User selected element: ${JSON.stringify(selectedElement)}`;
+
+                const fullContext = `${elementCtx}\nAvailable Packages: ${packages.join(', ')}`;
 
                 const payload = {
                     screenshot: base64data,
                     hierarchy: hierarchyStr,
-                    context: elementCtx,
+                    context: fullContext,
                     apiKey: apiKey,
                     instruction: customInstruction
                 };
@@ -2003,254 +2028,398 @@ function App() {
                                     )}
                                 </div>
 
-                                {/* Side Inspector Panel */}
-                                {selectedElement && (
-                                    <div className="inspector-sidebar-panel" style={{
-                                        width: '340px',
-                                        height: '100%',
-                                        background: 'var(--bg-secondary)',
-                                        border: '1px solid var(--border)',
-                                        borderRadius: '16px',
-                                        boxShadow: '0 20px 50px rgba(0,0,0,0.5)',
-                                        display: 'flex',
-                                        flexDirection: 'column',
-                                        overflow: 'hidden',
-                                        animation: 'sidebarIn 0.3s cubic-bezier(0.16, 1, 0.3, 1)'
-                                    }}>
-                                        <div style={{ padding: '16px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--accent)' }}></div>
-                                                <span style={{ fontSize: '11px', fontWeight: 800, color: '#fff', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Inspector</span>
-                                            </div>
-                                            <div style={{ display: 'flex', gap: '4px' }}>
-                                                <button
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        fetchHierarchy();
-                                                        setRefreshKey(Date.now());
-                                                    }}
-                                                    className={isFetchingHierarchy ? 'spin' : ''}
-                                                    style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: '14px', padding: '4px', display: 'flex', alignItems: 'center' }}
-                                                    title="Refresh Hierarchy"
-                                                >
-                                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 4v6h-6"></path><path d="M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
-                                                </button>
-                                                <button onClick={() => setSelectedElement(null)} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: '18px', padding: '4px' }}>×</button>
-                                            </div>
-                                        </div>
+                                {/* Side Intelligence & Inspector Panel */}
+                                <div className="inspector-sidebar-panel" style={{
+                                    width: '360px',
+                                    height: '100%',
+                                    background: 'var(--bg-secondary)',
+                                    border: '1px solid var(--border)',
+                                    borderRadius: '16px',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    overflow: 'hidden',
+                                    boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+                                    backdropFilter: 'blur(10px)',
+                                    animation: 'sidebarIn 0.3s cubic-bezier(0.16, 1, 0.3, 1)'
+                                }}>
+                                    {/* Tab Header */}
+                                    <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', background: 'rgba(0,0,0,0.2)' }}>
+                                        <button
+                                            onClick={() => setActiveTab('inspector')}
+                                            style={{
+                                                flex: 1, padding: '12px', fontSize: '11px', fontWeight: 700,
+                                                color: activeTab === 'inspector' ? 'var(--accent)' : '#666',
+                                                borderBottom: activeTab === 'inspector' ? '2px solid var(--accent)' : 'none',
+                                                background: 'transparent', border: 'none', cursor: 'pointer', transition: '0.2s'
+                                            }}
+                                        >
+                                            🔍 INSPECTOR
+                                        </button>
+                                        <button
+                                            onClick={() => { setActiveTab('intelligence'); fetchIntelligence(); }}
+                                            style={{
+                                                flex: 1, padding: '12px', fontSize: '11px', fontWeight: 700,
+                                                color: activeTab === 'intelligence' ? '#a78bfa' : '#666',
+                                                borderBottom: activeTab === 'intelligence' ? '2px solid #a78bfa' : 'none',
+                                                background: 'transparent', border: 'none', cursor: 'pointer', transition: '0.2s'
+                                            }}
+                                        >
+                                            🧠 AGENT BRAIN
+                                        </button>
+                                    </div>
 
-                                        <div style={{ flex: 1, overflowY: 'auto', padding: '16px' }}>
+                                    <div style={{ flex: 1, overflowY: 'auto', padding: '16px' }} className="custom-scrollbar">
+                                        {activeTab === 'intelligence' ? (
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                                                {/* 1. Header & Confidence Trend */}
+                                                <div style={{
+                                                    background: 'linear-gradient(135deg, rgba(167, 139, 250, 0.1) 0%, rgba(139, 92, 246, 0.05) 100%)',
+                                                    padding: '24px', borderRadius: '16px', border: '1px solid rgba(167, 139, 250, 0.2)',
+                                                    position: 'relative', overflow: 'hidden'
+                                                }}>
+                                                    <div style={{ position: 'absolute', top: '-20px', right: '-20px', width: '100px', height: '100px', background: 'var(--accent)', filter: 'blur(60px)', opacity: 0.2 }}></div>
 
-
-                                            {(() => {
-                                                const locators = getAvailableLocators(selectedElement);
-                                                const currentLocator = selectedElement.isPoint
-                                                    ? { selector: { point: `${Math.round(popupPosition?.x || 0)}%,${Math.round(popupPosition?.y || 0)}%` }, syntax: `point: "${Math.round(popupPosition?.x || 0)}%,${Math.round(popupPosition?.y || 0)}%"` }
-                                                    : (locators[selectedLocatorIndex] || locators[0] || { selector: { point: `${Math.round(popupPosition?.x || 0)}%,${Math.round(popupPosition?.y || 0)}%` }, syntax: `point: "${Math.round(popupPosition?.x || 0)}%,${Math.round(popupPosition?.y || 0)}%"` });
-
-                                                const selector = currentLocator.selector;
-                                                const stepCount = (editorContent.match(/^\s*-\s+/gm) || []).length + 1;
-
-                                                const labelText = currentLocator.type === 'Text' ? currentLocator.value : '';
-                                                const displayLabel = labelText.length > 20 ? labelText.substring(0, 18) + '...' : labelText;
-
-                                                const groups = [
-                                                    {
-                                                        title: '👉 Tap & Click',
-                                                        actions: [
-                                                            { label: displayLabel ? `Tap "${displayLabel}"` : 'Tap Element', yaml: formatYaml('tapOn', selector), cmd: 'tapOn' }
-                                                        ]
-                                                    },
-                                                    {
-                                                        title: '👁️ Assertions',
-                                                        actions: [
-                                                            { label: displayLabel ? `Assert "${displayLabel}"` : 'Assert Visible', yaml: formatYaml('assertVisible', selector), cmd: 'assertVisible' },
-                                                            { label: 'Assert Not Visible', yaml: formatYaml('assertNotVisible', selector), cmd: 'assertNotVisible' },
-                                                            {
-                                                                label: (() => {
-                                                                    const textLoc = locators.find(l => l.type === 'Text');
-                                                                    const accLoc = locators.find(l => l.type === 'Accessibility');
-                                                                    const t = textLoc ? textLoc.value : (accLoc ? accLoc.value : (selectedElement.text || selectedElement.attributes?.text || selectedElement.contentDescription || selectedElement['content-desc']));
-                                                                    return t ? `Assert "${t.length > 15 ? t.slice(0, 12) + '...' : t}"` : 'Assert Text';
-                                                                })(),
-                                                                yaml: (() => {
-                                                                    const textLoc = locators.find(l => l.type === 'Text');
-                                                                    const accLoc = locators.find(l => l.type === 'Accessibility');
-                                                                    const t = textLoc ? textLoc.value : (accLoc ? accLoc.value : (selectedElement.text || selectedElement.attributes?.text || selectedElement.contentDescription || selectedElement['content-desc']));
-                                                                    return t ? `- assertVisible: "${t.replace(/"/g, '\\"')}"` : `- assertVisible: "Expected Text"`;
-                                                                })(),
-                                                                cmd: 'assertVisible'
-                                                            }
-                                                        ]
-                                                    },
-                                                    {
-                                                        title: '🖐️ Swipe & Gestures',
-                                                        actions: [
-                                                            { label: 'Swipe Up', yaml: formatYaml('swipe', { direction: 'UP' }), cmd: 'swipe' },
-                                                            { label: 'Swipe Down', yaml: formatYaml('swipe', { direction: 'DOWN' }), cmd: 'swipe' },
-                                                            { label: 'Swipe Left', yaml: formatYaml('swipe', { direction: 'LEFT' }), cmd: 'swipe' },
-                                                            { label: 'Swipe Right', yaml: formatYaml('swipe', { direction: 'RIGHT' }), cmd: 'swipe' }
-                                                        ]
-                                                    },
-                                                    {
-                                                        title: '📜 Scroll',
-                                                        actions: [
-                                                            { label: 'Scroll Down', yaml: `- scroll:\n    direction: DOWN`, cmd: 'scroll' },
-                                                            { label: 'Scroll Up', yaml: `- scroll:\n    direction: UP`, cmd: 'scroll' }
-                                                        ]
-                                                    },
-                                                    {
-                                                        title: '⌨️ Input & Text',
-                                                        actions: [
-                                                            { label: 'Tap and Type', yaml: `${formatYaml('tapOn', selector)}\n- inputText: "your text"`, cmd: 'tapOn' },
-                                                            { label: 'Input Text', yaml: `- inputText: "your text here"`, cmd: 'inputText' },
-                                                            { label: 'Press Enter', yaml: `- pressKey: Enter`, cmd: 'pressKey' }
-                                                        ]
-                                                    },
-                                                    {
-                                                        title: '⏱️ Wait & Timing',
-                                                        actions: [
-                                                            { label: 'Wait for Visible', yaml: formatYaml('extendedWaitUntil', { visible: selector, timeout: 10000 }), cmd: 'extendedWaitUntil' },
-                                                            { label: 'Wait for Not Visible', yaml: formatYaml('extendedWaitUntil', { notVisible: selector, timeout: 10000 }), cmd: 'extendedWaitUntil' }
-                                                        ]
-                                                    },
-                                                    {
-                                                        title: '🧭 Navigation',
-                                                        actions: [
-                                                            { label: 'Back Button', yaml: `- pressKey: Back`, cmd: 'pressKey' },
-                                                            { label: 'Home Button', yaml: `- pressKey: Home`, cmd: 'pressKey' }
-                                                        ]
-                                                    }
-                                                ];
-
-                                                return (
-                                                    <>
-
-
-                                                        <div style={{ marginBottom: '24px' }}>
-                                                            <div style={{ fontSize: '9px', color: 'var(--accent)', fontWeight: 800, textTransform: 'uppercase', marginBottom: '8px', letterSpacing: '0.05em' }}>AI Assistant</div>
-                                                            <div style={{ display: 'flex', gap: '8px' }}>
-                                                                <button
-                                                                    className="inspector-action-btn"
-                                                                    style={{ flex: 1, border: '1px solid var(--accent)', background: 'rgba(44, 104, 246, 0.1)' }}
-                                                                    onClick={(e) => handleAIGenerate(e, null)}
-                                                                    disabled={isGeneratingAI}
-                                                                    title="Generate single step for selected"
-                                                                >
-                                                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
-                                                                        {isGeneratingAI ? <span className="spin" style={{ fontSize: '12px' }}>↻</span> : <span style={{ fontSize: '12px' }}>✨</span>}
-                                                                        <span style={{ fontWeight: 600, fontSize: '11px' }}>One Step</span>
-                                                                    </div>
-                                                                </button>
-                                                                <button
-                                                                    className="inspector-action-btn"
-                                                                    style={{ flex: 1, border: '1px solid #10b981', background: 'rgba(16, 185, 129, 0.1)' }}
-                                                                    onClick={(e) => handleAIGenerate(e, "Generate comprehensive assertions for ALL visible text elements and buttons on this screen. List them one by one.")}
-                                                                    disabled={isGeneratingAI}
-                                                                    title="Verify all visible elements"
-                                                                >
-                                                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
-                                                                        {isGeneratingAI ? <span className="spin" style={{ fontSize: '12px' }}>↻</span> : <span style={{ fontSize: '12px' }}>👁️</span>}
-                                                                        <span style={{ fontWeight: 600, fontSize: '11px' }}>Verify Page</span>
-                                                                    </div>
-                                                                </button>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
+                                                        <div>
+                                                            <div style={{ fontSize: '10px', color: '#a78bfa', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Intelligence Confidence</div>
+                                                            <div style={{ fontSize: '36px', fontWeight: 900, color: '#fff', marginTop: '4px' }}>
+                                                                {(() => {
+                                                                    const runs = agentIntelligence?.runs || [];
+                                                                    if (runs.length === 0) return 0;
+                                                                    return Math.round(runs[runs.length - 1].confidence_score * 100);
+                                                                })()}
+                                                                <span style={{ fontSize: '16px', opacity: 0.5, fontWeight: 500 }}>%</span>
                                                             </div>
                                                         </div>
+                                                        <div style={{ textAlign: 'right' }}>
+                                                            <div style={{ fontSize: '9px', color: '#666', fontWeight: 700 }}>STABILITY</div>
+                                                            <div style={{ fontSize: '11px', color: '#10b981', fontWeight: 600 }}>+2.4% vs last run</div>
+                                                        </div>
+                                                    </div>
 
-                                                        <div style={{ marginTop: '24px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
-                                                            {groups.map((group, gIdx) => (
-                                                                <div key={gIdx}>
-                                                                    <div style={{ fontSize: '10px', fontWeight: 800, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '12px' }}>
-                                                                        {group.title}
+                                                    {/* Confidence Sparkline (SVG) */}
+                                                    <div style={{ height: '40px', width: '100%', marginBottom: '8px' }}>
+                                                        <svg width="100%" height="40" preserveAspectRatio="none">
+                                                            <defs>
+                                                                <linearGradient id="lineGrad" x1="0" y1="0" x2="0" y2="1">
+                                                                    <stop offset="0%" stopColor="#a78bfa" stopOpacity="0.5" />
+                                                                    <stop offset="100%" stopColor="#a78bfa" stopOpacity="0" />
+                                                                </linearGradient>
+                                                            </defs>
+                                                            {(() => {
+                                                                const runs = agentIntelligence?.runs || [];
+                                                                if (runs.length < 2) return null;
+                                                                const scores = runs.slice(-10).map(r => r.confidence_score * 40);
+                                                                const width = 100 / (scores.length - 1);
+                                                                const path = `M 0,${40 - scores[0]} ` + scores.map((s, i) => `L ${i * width}%,${40 - s}`).join(' ');
+                                                                const areaPath = path + ` L 100%,40 L 0,40 Z`;
+                                                                return (
+                                                                    <>
+                                                                        <path d={areaPath} fill="url(#lineGrad)" />
+                                                                        <path d={path} fill="none" stroke="#a78bfa" strokeWidth="2" strokeLinejoin="round" />
+                                                                    </>
+                                                                );
+                                                            })()}
+                                                        </svg>
+                                                    </div>
+                                                </div>
+
+                                                {/* 2. Core Stats Grid */}
+                                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                                                    <div style={{ background: 'rgba(255,255,255,0.02)', padding: '16px', borderRadius: '12px', border: '1px solid var(--border)' }}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                                                            <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#10b981' }}></div>
+                                                            <span style={{ fontSize: '9px', color: '#666', fontWeight: 800, textTransform: 'uppercase' }}>Auto-Healed</span>
+                                                        </div>
+                                                        <div style={{ fontSize: '24px', fontWeight: 900, color: '#fff' }}>{agentIntelligence?.healed_count || 0}</div>
+                                                        <div style={{ fontSize: '10px', color: '#444', marginTop: '2px' }}>Events recorded</div>
+                                                    </div>
+                                                    <div style={{ background: 'rgba(255,255,255,0.02)', padding: '16px', borderRadius: '12px', border: '1px solid var(--border)' }}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                                                            <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#a78bfa' }}></div>
+                                                            <span style={{ fontSize: '9px', color: '#666', fontWeight: 800, textTransform: 'uppercase' }}>Memory Size</span>
+                                                        </div>
+                                                        <div style={{ fontSize: '24px', fontWeight: 900, color: '#fff' }}>{Object.keys(agentIntelligence?.screens || {}).length}</div>
+                                                        <div style={{ fontSize: '10px', color: '#444', marginTop: '2px' }}>Learned screens</div>
+                                                    </div>
+                                                </div>
+
+                                                {/* 3. Healing Timeline */}
+                                                <div>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                                                        <div style={{ fontSize: '10px', fontWeight: 800, color: '#fff', textTransform: 'uppercase', letterSpacing: '0.08em' }}>🧠 Healing Timeline</div>
+                                                        <div style={{ fontSize: '9px', color: 'var(--accent)', fontWeight: 700 }}>LIVE</div>
+                                                    </div>
+                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                                        {agentIntelligence?.failures?.filter(f => f.healed).slice(-5).reverse().map((fail, i) => (
+                                                            <div key={fail.failure_id} style={{
+                                                                padding: '12px', background: 'rgba(16, 185, 129, 0.05)', borderRadius: '8px', borderLeft: '3px solid #10b981',
+                                                                position: 'relative'
+                                                            }}>
+                                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '4px' }}>
+                                                                    <div style={{ fontSize: '11px', fontWeight: 700, color: '#fff' }}>Auto-Heal: {fail.reason}</div>
+                                                                    <div style={{ fontSize: '9px', color: '#666' }}>{new Date().toLocaleTimeString()}</div>
+                                                                </div>
+                                                                <div style={{ fontSize: '11px', color: '#888', fontStyle: 'italic', marginBottom: '4px' }}>"{fail.notes}"</div>
+                                                                <div style={{ display: 'flex', gap: '6px' }}>
+                                                                    <span style={{ fontSize: '9px', background: 'rgba(255,255,255,0.05)', color: '#aaa', padding: '2px 6px', borderRadius: '4px' }}>Mode: LEARN</span>
+                                                                    <span style={{ fontSize: '9px', background: 'rgba(16, 185, 129, 0.1)', color: '#10b981', padding: '2px 6px', borderRadius: '4px' }}>+0.01 Confidence</span>
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                        {(!agentIntelligence?.failures || agentIntelligence.failures.filter(f => f.healed).length === 0) && (
+                                                            <div style={{ padding: '24px', textAlign: 'center', border: '1px dashed var(--border)', borderRadius: '12px', opacity: 0.5 }}>
+                                                                <div style={{ fontSize: '11px' }}>No healing events yet. The agent is strictly validating flows.</div>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+
+                                                {/* 4. Run History Table */}
+                                                <div>
+                                                    <div style={{ fontSize: '10px', fontWeight: 800, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '12px' }}>Recent Test Runs</div>
+                                                    <div style={{ borderRadius: '12px', border: '1px solid var(--border)', overflow: 'hidden' }}>
+                                                        {agentIntelligence?.runs?.slice(-5).reverse().map((run, i) => (
+                                                            <div key={run.run_id} style={{
+                                                                padding: '12px', borderBottom: i === 4 ? 'none' : '1px solid var(--border)',
+                                                                background: 'rgba(255,255,255,0.01)', display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+                                                            }}>
+                                                                <div>
+                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                                        <div style={{ fontSize: '11px', fontWeight: 700 }}>{run.test_name}</div>
+                                                                        <div style={{ fontSize: '9px', background: run.status === 'PASS' ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)', color: run.status === 'PASS' ? '#10b981' : '#ef4444', padding: '1px 6px', borderRadius: '4px' }}>{run.status}</div>
                                                                     </div>
-                                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                                                        {group.actions.map((action, aIdx) => (
-                                                                            <div key={aIdx} style={{ display: 'flex', gap: '4px' }}>
-                                                                                <button
-                                                                                    className="inspector-action-btn"
-                                                                                    style={{ flex: 1 }}
-                                                                                    onClick={(e) => {
-                                                                                        e.stopPropagation();
-                                                                                        const cmd = `# ${stepCount}. ${action.label}\n${action.yaml}`;
-                                                                                        setEditorContent(prev => prev + (prev.endsWith('\n') ? '' : '\n') + cmd + '\n');
-                                                                                        addLog('success', `Added to YAML: ${action.label}`);
-                                                                                    }}
-                                                                                >
-                                                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
-                                                                                        <span style={{ fontWeight: 600 }}>{action.label}</span>
-                                                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
-                                                                                    </div>
-                                                                                    <code style={{ fontSize: '9px', opacity: 0.7, color: 'var(--accent)', marginTop: '4px', display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                                                                        {action.yaml.replace(/\n/g, ' ').trim()}
-                                                                                    </code>
-                                                                                </button>
-                                                                                <button
-                                                                                    className="btn-run-small"
-                                                                                    onClick={(e) => {
-                                                                                        e.stopPropagation();
+                                                                    <div style={{ fontSize: '10px', color: '#555' }}>ID: {run.run_id} • {(run.execution_time_ms / 1000).toFixed(1)}s</div>
+                                                                </div>
+                                                                <div style={{ textAlign: 'right' }}>
+                                                                    <div style={{ fontSize: '12px', fontWeight: 700, color: '#fff' }}>{Math.round(run.confidence_score * 100)}%</div>
+                                                                    <div style={{ fontSize: '9px', color: '#444' }}>Confidence</div>
+                                                                    <button
+                                                                        onClick={async () => {
+                                                                            try {
+                                                                                const res = await fetch(`${apiBaseUrl}/report/${run.run_id}`);
+                                                                                const report = await res.json();
+                                                                                setCurrentReport(report);
+                                                                                setShowReportModal(true);
+                                                                            } catch (err) {
+                                                                                console.error('Failed to fetch report:', err);
+                                                                            }
+                                                                        }}
+                                                                        style={{ marginTop: '8px', fontSize: '9px', background: 'rgba(167, 139, 250, 0.1)', color: '#a78bfa', border: '1px solid rgba(167, 139, 250, 0.2)', padding: '2px 6px', borderRadius: '4px', cursor: 'pointer' }}>
+                                                                        View Report
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                        {(!agentIntelligence?.runs || agentIntelligence.runs.length === 0) && (
+                                                            <div style={{ padding: '20px', textAlign: 'center', fontSize: '11px', color: '#666' }}>No runs recorded.</div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            /* Inspector Content */
+                                            selectedElement ? (
+                                                <>
+                                                    <div style={{ padding: '0 0 16px 0', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                            <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--accent)' }}></div>
+                                                            <span style={{ fontSize: '11px', fontWeight: 800, color: '#fff', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Inspector</span>
+                                                        </div>
+                                                        <div style={{ display: 'flex', gap: '4px' }}>
+                                                            <button
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    fetchHierarchy();
+                                                                    setRefreshKey(Date.now());
+                                                                }}
+                                                                className={isFetchingHierarchy ? 'spin' : ''}
+                                                                style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: '14px', padding: '4px', display: 'flex', alignItems: 'center' }}
+                                                                title="Refresh Hierarchy"
+                                                            >
+                                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 4v6h-6"></path><path d="M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                                                            </button>
+                                                            <button onClick={() => setSelectedElement(null)} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: '18px', padding: '4px' }}>×</button>
+                                                        </div>
+                                                    </div>
+                                                    <div style={{ flex: 1, overflowY: 'auto', padding: '16px 0 0 0' }}>
+                                                        {(() => {
+                                                            const locators = getAvailableLocators(selectedElement);
+                                                            const currentLocator = selectedElement.isPoint
+                                                                ? { selector: { point: `${Math.round(popupPosition?.x || 0)}%,${Math.round(popupPosition?.y || 0)}%` }, syntax: `point: "${Math.round(popupPosition?.x || 0)}%,${Math.round(popupPosition?.y || 0)}%"` }
+                                                                : (locators[selectedLocatorIndex] || locators[0] || { selector: { point: `${Math.round(popupPosition?.x || 0)}%,${Math.round(popupPosition?.y || 0)}%` }, syntax: `point: "${Math.round(popupPosition?.x || 0)}%,${Math.round(popupPosition?.y || 0)}%"` });
 
-                                                                                        // Build step object based on command type
-                                                                                        let stepObj = {};
-                                                                                        const cmd = action.cmd;
+                                                            const selector = currentLocator.selector;
+                                                            const stepCount = (editorContent.match(/^\s*-\s+/gm) || []).length + 1;
 
-                                                                                        // Commands with selectors
-                                                                                        if (['tapOn', 'doubleTapOn', 'longPressOn', 'assertVisible', 'assertNotVisible'].includes(cmd)) {
-                                                                                            stepObj[cmd] = selector;
-                                                                                        }
-                                                                                        // Scroll commands
-                                                                                        else if (cmd === 'scroll') {
-                                                                                            stepObj.scroll = { direction: action.yaml.includes('DOWN') ? 'DOWN' : 'UP' };
-                                                                                        }
-                                                                                        else if (cmd === 'scrollUntilVisible') {
-                                                                                            stepObj.scrollUntilVisible = { element: selector, direction: 'DOWN' };
-                                                                                        }
-                                                                                        // Swipe commands
-                                                                                        else if (cmd === 'swipe') {
-                                                                                            const dir = action.yaml.match(/direction:\s*(\w+)/)?.[1] || 'UP';
-                                                                                            stepObj.swipe = { direction: dir };
-                                                                                        }
-                                                                                        // Wait commands
-                                                                                        else if (cmd === 'extendedWaitUntil') {
-                                                                                            if (action.yaml.includes('notVisible')) {
-                                                                                                stepObj.extendedWaitUntil = { notVisible: selector, timeout: 10000 };
-                                                                                            } else {
-                                                                                                stepObj.extendedWaitUntil = { visible: selector, timeout: 10000 };
-                                                                                            }
-                                                                                        }
-                                                                                        else if (cmd === 'wait') {
-                                                                                            stepObj.wait = 2000;
-                                                                                        }
-                                                                                        // Simple commands
-                                                                                        else if (['back', 'hideKeyboard', 'takeScreenshot', 'startRecording', 'stopRecording'].includes(cmd)) {
-                                                                                            stepObj[cmd] = true;
-                                                                                        }
-                                                                                        // Input commands (skip for now as they need user input)
-                                                                                        else if (['inputText', 'eraseText', 'pressKey', 'openLink'].includes(cmd)) {
-                                                                                            addLog('info', `${action.label} - Please edit the YAML to customize`);
-                                                                                            return;
-                                                                                        }
+                                                            const labelText = currentLocator.type === 'Text' ? currentLocator.value : '';
+                                                            const displayLabel = labelText.length > 20 ? labelText.substring(0, 18) + '...' : labelText;
 
-                                                                                        if (Object.keys(stepObj).length > 0) {
-                                                                                            addLog('info', `Running: ${action.label}`);
-                                                                                            runStep(stepObj);
-                                                                                        }
-                                                                                    }}
-                                                                                    title="Run Step Now"
-                                                                                >
-                                                                                    ▶
-                                                                                </button>
+                                                            const groups = [
+                                                                {
+                                                                    title: '👉 Tap & Click',
+                                                                    actions: [
+                                                                        { label: displayLabel ? `Tap "${displayLabel}"` : 'Tap Element', yaml: formatYaml('tapOn', selector), cmd: 'tapOn' }
+                                                                    ]
+                                                                },
+                                                                {
+                                                                    title: '👁️ Assertions',
+                                                                    actions: [
+                                                                        { label: displayLabel ? `Assert "${displayLabel}"` : 'Assert Visible', yaml: formatYaml('assertVisible', selector), cmd: 'assertVisible' },
+                                                                        { label: 'Assert Not Visible', yaml: formatYaml('assertNotVisible', selector), cmd: 'assertNotVisible' }
+                                                                    ]
+                                                                },
+                                                                {
+                                                                    title: '🖐️ Swipe & Gestures',
+                                                                    actions: [
+                                                                        { label: 'Swipe Up', yaml: formatYaml('swipe', { direction: 'UP' }), cmd: 'swipe' },
+                                                                        { label: 'Swipe Down', yaml: formatYaml('swipe', { direction: 'DOWN' }), cmd: 'swipe' },
+                                                                        { label: 'Swipe Right', yaml: formatYaml('swipe', { direction: 'RIGHT' }), cmd: 'swipe' },
+                                                                        { label: 'Swipe Left', yaml: formatYaml('swipe', { direction: 'LEFT' }), cmd: 'swipe' }
+                                                                    ]
+                                                                },
+                                                                {
+                                                                    title: '📜 Scroll',
+                                                                    actions: [
+                                                                        { label: 'Scroll Down', yaml: `- scroll:\n    direction: DOWN`, cmd: 'scroll' },
+                                                                        { label: 'Scroll Up', yaml: `- scroll:\n    direction: UP`, cmd: 'scroll' },
+                                                                        { label: 'Scroll Right', yaml: `- scroll:\n    direction: RIGHT`, cmd: 'scroll' },
+                                                                        { label: 'Scroll Left', yaml: `- scroll:\n    direction: LEFT`, cmd: 'scroll' }
+                                                                    ]
+                                                                },
+                                                                {
+                                                                    title: '⌨️ Input & Text',
+                                                                    actions: [
+                                                                        { label: 'Input Text', yaml: `- inputText: "your text here"`, cmd: 'inputText' },
+                                                                        { label: 'Press Enter', yaml: `- pressKey: Enter`, cmd: 'pressKey' }
+                                                                    ]
+                                                                }
+                                                            ];
+
+                                                            return (
+                                                                <>
+                                                                    <div style={{ marginBottom: '24px' }}>
+                                                                        <div style={{ fontSize: '9px', color: 'var(--accent)', fontWeight: 800, textTransform: 'uppercase', marginBottom: '8px', letterSpacing: '0.05em' }}>AI Assistant</div>
+                                                                        <div style={{ marginBottom: '8px' }}>
+                                                                            <textarea
+                                                                                placeholder="Describe action (e.g. 'Tap the Login button')"
+                                                                                value={aiPrompt}
+                                                                                onChange={(e) => setAiPrompt(e.target.value)}
+                                                                                style={{
+                                                                                    width: '100%',
+                                                                                    background: 'rgba(0,0,0,0.2)',
+                                                                                    border: '1px solid var(--border)',
+                                                                                    borderRadius: '6px',
+                                                                                    padding: '8px',
+                                                                                    fontSize: '11px',
+                                                                                    color: 'var(--text-primary)',
+                                                                                    minHeight: '60px',
+                                                                                    resize: 'vertical',
+                                                                                    marginBottom: '4px',
+                                                                                    fontFamily: 'inherit'
+                                                                                }}
+                                                                            />
+                                                                            <button
+                                                                                className="inspector-action-btn"
+                                                                                style={{ width: '100%', border: '1px solid var(--accent)', background: 'var(--accent)', color: '#fff' }}
+                                                                                onClick={(e) => handleAIGenerate(e, aiPrompt || null)}
+                                                                                disabled={isGeneratingAI}
+                                                                            >
+                                                                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+                                                                                    {isGeneratingAI ? <span className="spin" style={{ fontSize: '12px' }}>↻</span> : <span style={{ fontSize: '12px' }}>✨</span>}
+                                                                                    <span style={{ fontWeight: 600, fontSize: '11px' }}>Generate from Prompt</span>
+                                                                                </div>
+                                                                            </button>
+                                                                        </div>
+
+                                                                        <div style={{ display: 'flex', gap: '8px' }}>
+                                                                            <button
+                                                                                className="inspector-action-btn"
+                                                                                style={{ flex: 1, border: '1px solid #10b981', background: 'rgba(16, 185, 129, 0.1)' }}
+                                                                                onClick={(e) => handleAIGenerate(e, "Generate assertions for all visible text elements")}
+                                                                                disabled={isGeneratingAI}
+                                                                            >
+                                                                                <span style={{ fontWeight: 600, fontSize: '10px' }}>Add Assertion</span>
+                                                                            </button>
+                                                                        </div>
+                                                                    </div>
+
+                                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                                                                        {groups.map((group, gIdx) => (
+                                                                            <div key={gIdx}>
+                                                                                <div style={{ fontSize: '10px', fontWeight: 800, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '12px' }}>
+                                                                                    {group.title}
+                                                                                </div>
+                                                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                                                                    {group.actions.map((action, aIdx) => (
+                                                                                        <div key={aIdx} style={{ display: 'flex', gap: '4px' }}>
+                                                                                            <button
+                                                                                                className="inspector-action-btn"
+                                                                                                style={{ flex: 1 }}
+                                                                                                onClick={(e) => {
+                                                                                                    e.stopPropagation();
+                                                                                                    const cmd = `# ${stepCount}. ${action.label}\n${action.yaml}`;
+                                                                                                    setEditorContent(prev => prev + (prev.endsWith('\n') ? '' : '\n') + cmd + '\n');
+                                                                                                    addLog('success', `Added to YAML: ${action.label}`);
+                                                                                                }}
+                                                                                            >
+                                                                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                                                                    <span style={{ fontWeight: 600 }}>{action.label}</span>
+                                                                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                                                                                                </div>
+                                                                                            </button>
+                                                                                            <button
+                                                                                                className="btn-run-small"
+                                                                                                onClick={(e) => {
+                                                                                                    e.stopPropagation();
+                                                                                                    // Build step logic for runStep
+                                                                                                    let stepObj = {};
+                                                                                                    if (action.cmd === 'tapOn' || action.cmd === 'assertVisible' || action.cmd === 'assertNotVisible') {
+                                                                                                        stepObj[action.cmd] = selector;
+                                                                                                    } else if (action.cmd === 'scroll') {
+                                                                                                        let dir = 'DOWN';
+                                                                                                        if (action.yaml.includes('UP')) dir = 'UP';
+                                                                                                        else if (action.yaml.includes('RIGHT')) dir = 'RIGHT';
+                                                                                                        else if (action.yaml.includes('LEFT')) dir = 'LEFT';
+                                                                                                        stepObj.scroll = { direction: dir };
+                                                                                                    } else if (action.cmd === 'swipe') {
+                                                                                                        let dir = 'DOWN';
+                                                                                                        if (action.yaml.includes('UP')) dir = 'UP';
+                                                                                                        else if (action.yaml.includes('RIGHT')) dir = 'RIGHT';
+                                                                                                        else if (action.yaml.includes('LEFT')) dir = 'LEFT';
+                                                                                                        stepObj.swipe = { direction: dir };
+                                                                                                    } else {
+                                                                                                        // Fallback to YAML for complex commands
+                                                                                                        runStep(action.yaml);
+                                                                                                        return;
+                                                                                                    }
+                                                                                                    addLog('info', `Running: ${action.label}`);
+                                                                                                    runStep(stepObj);
+                                                                                                }}
+                                                                                            >
+                                                                                                ▶
+                                                                                            </button>
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
                                                                             </div>
                                                                         ))}
                                                                     </div>
-                                                                </div>
-                                                            ))}
-                                                        </div>
-                                                    </>
-                                                );
-                                            })()}
-                                        </div>
+                                                                </>
+                                                            );
+                                                        })()}
+                                                    </div>
+                                                </>
+                                            ) : (
+                                                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', opacity: 0.3, textAlign: 'center', padding: '40px' }}>
+                                                    <div style={{ fontSize: '32px', marginBottom: '16px' }}>🖱️</div>
+                                                    <div style={{ fontSize: '12px', fontWeight: 600 }}>Inspector Active</div>
+                                                    <div style={{ fontSize: '10px' }}>Tap any element on the screen to view actions</div>
+                                                </div>
+                                            )
+                                        )}
                                     </div>
-                                )}
+                                </div>
                             </div>
                         </div>
                     )}
@@ -2525,6 +2694,354 @@ function App() {
                                         .catch(err => addLog('error', `Failed to create folder: ${err.message}`));
                                 }
                             }}>Create</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* AI Report Modal */}
+            {showReportModal && currentReport && (
+                <div
+                    style={{
+                        position: 'fixed',
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        background: 'rgba(0, 0, 0, 0.85)',
+                        backdropFilter: 'blur(8px)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        zIndex: 10000,
+                        animation: 'fadeIn 0.2s ease-out'
+                    }}
+                    onClick={() => setShowReportModal(false)}
+                >
+                    <div
+                        style={{
+                            background: 'linear-gradient(135deg, rgba(22, 22, 24, 0.98) 0%, rgba(15, 15, 17, 0.98) 100%)',
+                            border: '1px solid rgba(255, 255, 255, 0.1)',
+                            borderRadius: '24px',
+                            maxWidth: '720px',
+                            width: '90%',
+                            maxHeight: '85vh',
+                            overflow: 'hidden',
+                            boxShadow: '0 40px 80px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05)',
+                            animation: 'slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
+                            display: 'flex',
+                            flexDirection: 'column'
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        {/* Modal Header */}
+                        <div style={{
+                            padding: '28px 32px 24px',
+                            borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+                            background: 'linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, transparent 100%)'
+                        }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                    <div style={{
+                                        width: '40px',
+                                        height: '40px',
+                                        borderRadius: '12px',
+                                        background: currentReport.summary.status === 'PASS'
+                                            ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)'
+                                            : 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        fontSize: '20px'
+                                    }}>{currentReport.summary.status === 'PASS' ? '✓' : '✗'}</div>
+                                    <div>
+                                        <div style={{ fontSize: '20px', fontWeight: 800, color: '#fff', letterSpacing: '-0.02em' }}>
+                                            Test Report
+                                        </div>
+                                        <div style={{ fontSize: '12px', color: '#888', marginTop: '2px' }}>
+                                            {currentReport.summary.test_name}
+                                        </div>
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => setShowReportModal(false)}
+                                    style={{
+                                        width: '32px',
+                                        height: '32px',
+                                        borderRadius: '8px',
+                                        border: '1px solid rgba(255, 255, 255, 0.1)',
+                                        background: 'rgba(255, 255, 255, 0.03)',
+                                        color: '#888',
+                                        cursor: 'pointer',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        fontSize: '18px',
+                                        transition: 'all 0.2s'
+                                    }}
+                                    onMouseEnter={(e) => {
+                                        e.target.style.background = 'rgba(255, 255, 255, 0.08)';
+                                        e.target.style.color = '#fff';
+                                    }}
+                                    onMouseLeave={(e) => {
+                                        e.target.style.background = 'rgba(255, 255, 255, 0.03)';
+                                        e.target.style.color = '#888';
+                                    }}
+                                >×</button>
+                            </div>
+
+                            {/* Summary Stats */}
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
+                                <div style={{
+                                    background: 'rgba(255, 255, 255, 0.03)',
+                                    border: '1px solid rgba(255, 255, 255, 0.08)',
+                                    borderRadius: '12px',
+                                    padding: '14px',
+                                    textAlign: 'center'
+                                }}>
+                                    <div style={{ fontSize: '10px', color: '#888', marginBottom: '6px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Total Steps</div>
+                                    <div style={{ fontSize: '20px', fontWeight: 800, color: '#fff' }}>{currentReport.summary.total_steps}</div>
+                                </div>
+
+                                <div style={{
+                                    background: 'rgba(16, 185, 129, 0.08)',
+                                    border: '1px solid rgba(16, 185, 129, 0.2)',
+                                    borderRadius: '12px',
+                                    padding: '14px',
+                                    textAlign: 'center'
+                                }}>
+                                    <div style={{ fontSize: '10px', color: '#888', marginBottom: '6px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Passed</div>
+                                    <div style={{ fontSize: '20px', fontWeight: 800, color: '#10b981' }}>{currentReport.summary.passed_steps}</div>
+                                </div>
+
+                                <div style={{
+                                    background: currentReport.summary.failed_steps > 0 ? 'rgba(239, 68, 68, 0.08)' : 'rgba(255, 255, 255, 0.03)',
+                                    border: currentReport.summary.failed_steps > 0 ? '1px solid rgba(239, 68, 68, 0.2)' : '1px solid rgba(255, 255, 255, 0.08)',
+                                    borderRadius: '12px',
+                                    padding: '14px',
+                                    textAlign: 'center'
+                                }}>
+                                    <div style={{ fontSize: '10px', color: '#888', marginBottom: '6px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Failed</div>
+                                    <div style={{ fontSize: '20px', fontWeight: 800, color: currentReport.summary.failed_steps > 0 ? '#ef4444' : '#666' }}>
+                                        {currentReport.summary.failed_steps}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Modal Body */}
+                        <div style={{
+                            flex: 1,
+                            overflowY: 'auto',
+                            padding: '24px 32px'
+                        }}>
+                            {/* Failure Details */}
+                            {currentReport.failure_details && currentReport.failure_details.length > 0 && (
+                                <div style={{ marginBottom: '28px' }}>
+                                    <div style={{
+                                        fontSize: '11px',
+                                        fontWeight: 800,
+                                        color: '#ef4444',
+                                        textTransform: 'uppercase',
+                                        letterSpacing: '0.08em',
+                                        marginBottom: '14px',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '8px'
+                                    }}>
+                                        <span style={{ fontSize: '16px' }}>⚠️</span>
+                                        What Failed
+                                    </div>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                        {currentReport.failure_details.map((failure, i) => (
+                                            <div key={i} style={{
+                                                background: 'rgba(239, 68, 68, 0.05)',
+                                                border: '1px solid rgba(239, 68, 68, 0.2)',
+                                                borderLeft: '4px solid #ef4444',
+                                                borderRadius: '8px',
+                                                padding: '16px 18px'
+                                            }}>
+                                                <div style={{ fontSize: '13px', fontWeight: 700, color: '#fff', marginBottom: '8px' }}>
+                                                    Step: {failure.failed_step}
+                                                </div>
+                                                <div style={{ fontSize: '12px', color: '#ef4444', marginBottom: '6px' }}>
+                                                    ❌ {failure.reason}
+                                                </div>
+                                                {failure.details && (
+                                                    <div style={{ fontSize: '11px', color: '#999', fontStyle: 'italic', marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                                                        {failure.details}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Recommendation */}
+                            {currentReport.recommendation && (
+                                <div style={{ marginBottom: '28px' }}>
+                                    <div style={{
+                                        fontSize: '11px',
+                                        fontWeight: 800,
+                                        color: '#888',
+                                        textTransform: 'uppercase',
+                                        letterSpacing: '0.08em',
+                                        marginBottom: '14px'
+                                    }}>Next Steps</div>
+                                    <div style={{
+                                        background: currentReport.summary.status === 'PASS'
+                                            ? 'rgba(16, 185, 129, 0.05)'
+                                            : 'rgba(59, 130, 246, 0.05)',
+                                        border: currentReport.summary.status === 'PASS'
+                                            ? '1px solid rgba(16, 185, 129, 0.2)'
+                                            : '1px solid rgba(59, 130, 246, 0.2)',
+                                        borderLeft: currentReport.summary.status === 'PASS'
+                                            ? '4px solid #10b981'
+                                            : '4px solid #3b82f6',
+                                        borderRadius: '8px',
+                                        padding: '16px 18px',
+                                        fontSize: '13px',
+                                        color: '#ddd',
+                                        lineHeight: '1.6'
+                                    }}>
+                                        {currentReport.recommendation}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Execution Steps */}
+                            <div>
+                                <div style={{
+                                    fontSize: '11px',
+                                    fontWeight: 800,
+                                    color: '#888',
+                                    textTransform: 'uppercase',
+                                    letterSpacing: '0.08em',
+                                    marginBottom: '14px'
+                                }}>Step-by-Step Execution</div>
+                                <div style={{
+                                    background: 'rgba(255, 255, 255, 0.02)',
+                                    border: '1px solid rgba(255, 255, 255, 0.08)',
+                                    borderRadius: '12px',
+                                    overflow: 'hidden'
+                                }}>
+                                    {currentReport.execution_steps && currentReport.execution_steps.map((step, i) => (
+                                        <div key={i} style={{
+                                            padding: '12px 16px',
+                                            borderBottom: i === currentReport.execution_steps.length - 1 ? 'none' : '1px solid rgba(255, 255, 255, 0.05)',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '12px',
+                                            background: step.status === 'FAIL' ? 'rgba(239, 68, 68, 0.03)' : 'transparent'
+                                        }}>
+                                            <div style={{
+                                                width: '24px',
+                                                height: '24px',
+                                                borderRadius: '6px',
+                                                background: step.status === 'SUCCESS'
+                                                    ? 'rgba(16, 185, 129, 0.15)'
+                                                    : 'rgba(239, 68, 68, 0.15)',
+                                                color: step.status === 'SUCCESS' ? '#10b981' : '#ef4444',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                fontSize: '12px',
+                                                fontWeight: 700,
+                                                flexShrink: 0
+                                            }}>
+                                                {step.status === 'SUCCESS' ? '✓' : '✗'}
+                                            </div>
+                                            <div style={{ flex: 1, minWidth: 0 }}>
+                                                <div style={{ fontSize: '12px', color: '#ddd', fontWeight: 500 }}>
+                                                    {step.action}
+                                                </div>
+                                            </div>
+                                            <div style={{ fontSize: '10px', color: '#666', fontFamily: 'JetBrains Mono, monospace' }}>
+                                                {step.time_ms}ms
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Modal Footer */}
+                        <div style={{
+                            padding: '20px 32px',
+                            borderTop: '1px solid rgba(255, 255, 255, 0.08)',
+                            background: 'rgba(0, 0, 0, 0.2)',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center'
+                        }}>
+                            <div style={{ fontSize: '11px', color: '#666' }}>
+                                Duration: <span style={{ color: '#888', fontWeight: 600 }}>{currentReport.summary.duration_seconds}s</span>
+                                <span style={{ margin: '0 8px', color: '#444' }}>•</span>
+                                Run ID: <span style={{ color: '#888', fontFamily: 'JetBrains Mono, monospace' }}>{currentReport.summary.run_id}</span>
+                            </div>
+                            <div style={{ display: 'flex', gap: '12px' }}>
+                                <button
+                                    onClick={async () => {
+                                        if (confirm('Are you sure you want to delete this test run?')) {
+                                            try {
+                                                await fetch(`${apiBaseUrl}/report/${currentReport.summary.run_id}`, {
+                                                    method: 'DELETE'
+                                                });
+                                                setShowReportModal(false);
+                                                fetchIntelligence(); // Refresh the list
+                                            } catch (err) {
+                                                console.error('Failed to delete run:', err);
+                                            }
+                                        }
+                                    }}
+                                    style={{
+                                        background: 'rgba(239, 68, 68, 0.1)',
+                                        border: '1px solid rgba(239, 68, 68, 0.3)',
+                                        borderRadius: '8px',
+                                        padding: '10px 20px',
+                                        color: '#ef4444',
+                                        fontSize: '13px',
+                                        fontWeight: 600,
+                                        cursor: 'pointer',
+                                        transition: 'all 0.2s'
+                                    }}
+                                    onMouseEnter={(e) => {
+                                        e.target.style.background = 'rgba(239, 68, 68, 0.2)';
+                                        e.target.style.borderColor = 'rgba(239, 68, 68, 0.5)';
+                                    }}
+                                    onMouseLeave={(e) => {
+                                        e.target.style.background = 'rgba(239, 68, 68, 0.1)';
+                                        e.target.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+                                    }}
+                                >Delete</button>
+                                <button
+                                    onClick={() => setShowReportModal(false)}
+                                    style={{
+                                        background: currentReport.summary.status === 'PASS'
+                                            ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)'
+                                            : 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
+                                        border: 'none',
+                                        borderRadius: '8px',
+                                        padding: '10px 24px',
+                                        color: '#fff',
+                                        fontSize: '13px',
+                                        fontWeight: 600,
+                                        cursor: 'pointer',
+                                        transition: 'all 0.2s'
+                                    }}
+                                    onMouseEnter={(e) => {
+                                        e.target.style.transform = 'translateY(-1px)';
+                                        e.target.style.boxShadow = currentReport.summary.status === 'PASS'
+                                            ? '0 8px 16px rgba(16, 185, 129, 0.3)'
+                                            : '0 8px 16px rgba(59, 130, 246, 0.3)';
+                                    }}
+                                    onMouseLeave={(e) => {
+                                        e.target.style.transform = 'translateY(0)';
+                                        e.target.style.boxShadow = 'none';
+                                    }}
+                                >Close</button>
+                            </div>
                         </div>
                     </div>
                 </div>
