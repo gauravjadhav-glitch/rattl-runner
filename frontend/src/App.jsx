@@ -462,14 +462,6 @@ function App() {
             const data = await res.json();
             const pkgs = data.packages || [];
             setPackages(pkgs);
-
-            // If appId is still the default and we have packages, update it
-            setModalData(prev => {
-                if (pkgs.length > 0 && (prev.appId === 'com.hamleys_webapp' || !prev.appId)) {
-                    return { ...prev, appId: pkgs[0] };
-                }
-                return prev;
-            });
         } catch (e) {
             console.error('Fetch packages error:', e);
         }
