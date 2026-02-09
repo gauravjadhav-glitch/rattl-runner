@@ -31,6 +31,7 @@ app.add_middleware(
 class TestRequest(BaseModel):
     yaml_content: str
     apiKey: str = "" # Optional, for AI Vision features
+    filename: str = "" # Optional, for better test naming
 
 class FileSaveRequest(BaseModel):
     path: str
@@ -74,6 +75,51 @@ def get_packages():
 class RunStepRequest(BaseModel):
     step: dict
 
+@app.get("/api/intelligence/stats")
+async def get_intelligence_stats():
+    from intelligence import intelligence
+    return intelligence.raw_data
+
+@app.post("/memory/screen")
+async def save_screen(request: dict):
+    from intelligence import intelligence
+    intelligence.learn_screen(request["ui_hash"], request.get("screenshot_path", ""), request.get("run_id", "unknown"))
+    return {"status": "success"}
+
+@app.post("/planner/plan")
+async def get_test_plan(request: dict):
+    from planner import planner
+    plan = planner.generate_plan(request["test_objective"], request.get("context", {}))
+    return plan
+
+@app.post("/healer/analyze")
+async def analyze_failure(request: dict):
+    from healer import healer
+    analysis = healer.analyze_failure(
+        request["run_id"], 
+        request["action_data"], 
+        request["error_msg"], 
+        request.get("screen_snapshot", {})
+    )
+    return analysis
+
+@app.get("/report/{run_id}")
+async def get_run_report(run_id: str):
+    from reporter import reporter
+    report = reporter.generate_run_report(run_id)
+    if "error" in report:
+        raise HTTPException(status_code=404, detail=report["error"])
+    return report
+
+@app.delete("/report/{run_id}")
+async def delete_run_report(run_id: str):
+    from intelligence import intelligence
+    success = intelligence.delete_run(run_id)
+    if success:
+        return {"status": "success", "message": f"Run {run_id} deleted"}
+    else:
+        raise HTTPException(status_code=404, detail="Run not found")
+
 @app.post("/validate-yaml")
 def validate_yaml(request: TestRequest):
     """Validate YAML syntax AND Maestro Schema"""
@@ -95,14 +141,14 @@ def validate_yaml(request: TestRequest):
         if not isinstance(flow, list):
             return {"valid": False, "error": "Test flow must be a list of steps (starting with '-')"}
 
-        # --- Maestro Schema Validation ---
+
         VALID_COMMANDS = {
             "tapOn", "doubleTapOn", "longPressOn", 
             "inputText", "eraseText", "inputRandomText", "inputRandomNumber", "inputRandomEmail", "inputRandomPersonName",
             "assertVisible", "assertNotVisible", "assertTrue",
-            "scroll", "swipe", "pressKey", "back", "hideKeyboard", "volumeUp", "volumeDown",
+            "scroll", "swipe", "scrollUntilVisible", "pressKey", "back", "hideKeyboard", "volumeUp", "volumeDown",
             "openLink", "stopApp", "clearState", "clearKeychain", "launchApp", "killApp",
-            "runFlow", "extendedWaitUntil", "waitForAnimationToEnd", "waitForAnimation",
+            "runFlow", "extendedWaitUntil", "waitForAnimationToEnd", "waitForAnimation", "wait",
             "repeat", "webhook", "takeScreenshot",
             "copyTextFrom", "pasteText",
             "evalScript", "runScript",
@@ -160,7 +206,10 @@ def run_test(request: TestRequest):
             error_msg = f"YAML Syntax Error at line {mark.line + 1}, column {mark.column + 1}: {e.problem}"
         raise HTTPException(status_code=400, detail=error_msg)
 
-    return StreamingResponse(runner.run_yaml_custom(request.yaml_content, api_key=request.apiKey), media_type="text/event-stream")
+    return StreamingResponse(
+        runner.run_yaml_custom(request.yaml_content, api_key=request.apiKey, filename=request.filename), 
+        media_type="text/event-stream"
+    )
 
 class RunFolderRequest(BaseModel):
     folder_path: str
@@ -421,18 +470,25 @@ def generate_step_ai(request: AIRequest):
         base_instruction = request.instruction or "Based on the user's context, output a SINGLE valid Maestro YAML step."
         
         system_prompt = (
-            "You are an expert in Maestro (mobile automation). "
-            "Analyze the provided Android screenshot and view hierarchy. "
-            f"{base_instruction} "
-            "CRITICAL RULES:\n"
-            "1. EXTRACT TEXT EXACTLY: When generating `assertVisible` or `tapOn`, copy text *exactly* as it appears in the screenshot (preserve case, full length).\n"
-            "2. NO TYPOS: Do not truncate words (e.g., use 'Profile', not 'Profil').\n"
-            "3. STRICT MATCHING: For `assertVisible`, ALWAYS use regex format: `assertVisible: \"regexp:^TEXT$\"`. This enforces exact match. Escape special regex characters like bracket or dot.\n"
-            "4. USE VALID YAML: Output ONLY the YAML block. No markdown."
+            "You are an AI test generation agent.\n"
+            "Your job is to convert natural language user instructions into optimized test cases.\n"
+            "SYSTEM RULES:\n"
+            "1. Remove redundant or repeated steps automatically.\n"
+            "2. Generate only the minimum required actions to reach the goal.\n"
+            "3. SMART OMISSION: If two consecutive steps lead to the same UI state (e.g. waitForAnimation then waitForPageLoad), keep only the final step.\n"
+            "4. SMART LAUNCH: If the user asks to 'Open' an app, but the screenshot shows the app is likely already open, OMIT the `launchApp` step.\n"
+            "5. MANDATORY VERIFICATION: Append an `assertVisible` step for the final state using ONLY text visible on the screen. Do NOT invent text (e.g. use 'Profile', NEVER 'Profile Page' unless 'Page' is visible).\n"
+            "6. PREFER INTENTS: Use text (`text: \"...\"`) or resource-id (`id: \"...\"`) selectors over coordinates. Do NOT use `point` unless absolutely necessary.\n"
+            "7. CLEAN YAML: Output ONLY the valid Maestro YAML block. No markdown, no explanations.\n"
+            "8. SIMPLE STRINGS: Use simple quoted strings for text matching (e.g. `tapOn: \"Allow\"`), NOT regex, unless strictly necessary.\n"
+            "9. NO HALLUCINATIONS: Copy text EXACTLY from the screenshot. Do NOT add suffixes like 'Screen' or 'Page'. Do NOT use placeholder IDs like 'mobile_input_field_id'.\n"
+            "10. FLAT STEPS: Do NOT nest actions. Use sequential steps. Example: `- tapOn: \"A\"` then `- tapOn: \"B\"`, NOT `tapOn: [\"A\", \"B\"]`.\n"
+            "11. SIMPLE INPUT: For typing text, just use `- inputText: \"value\"`. Only include `id` if you are 100% sure from hierarchy. Do NOT guess IDs.\n"
+            "12. TARGET: Generate a valid Maestro flow (list of steps) based on the user's prompt."
         )
         
         user_content = [
-             {"type": "text", "text": f"Context: {request.context}\nHierarchy Info (Truncated): {request.hierarchy[:15000]}"},
+             {"type": "text", "text": f"TASK: {base_instruction}\nContext: {request.context}\nHierarchy Info (Truncated): {request.hierarchy[:15000]}"},
              {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{request.screenshot}"}}
         ]
         
@@ -456,10 +512,27 @@ def generate_step_ai(request: AIRequest):
         if "error" in data:
              return {"success": False, "error": data["error"]["message"]}
              
-        # 4. Parse
+        # 4. Parse & Clean
         content = data["choices"][0]["message"]["content"]
-        # Clean up
-        content = content.replace("```yaml", "").replace("```", "").strip()
+        
+        # Robust extraction of code block
+        import re
+        # Try to find ```yaml ... ``` or just ``` ... ```
+        code_match = re.search(r"```(?:yaml)?(.*?)```", content, re.DOTALL)
+        if code_match:
+            content = code_match.group(1)
+        
+        # Strip generic conversational filler if it leaked through (fallback)
+        lines = content.split('\n')
+        filtered_lines = []
+        for line in lines:
+            l = line.strip()
+            # aggressive filter for common chatty headers that break YAML
+            if l.lower().startswith("here is") or l.lower().startswith("sure,"):
+                continue
+            filtered_lines.append(line)
+            
+        content = "\n".join(filtered_lines).strip()
         
         return {"success": True, "yaml": content}
         
