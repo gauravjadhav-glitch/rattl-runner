@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from typing import List, Optional, Literal, Dict
 import subprocess
 import tempfile
 import os
@@ -228,6 +229,21 @@ def run_step(request: RunStepRequest):
     except Exception as e:
         print(f"Step execution error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+class GoalRequest(BaseModel):
+    goal: str
+    appId: Optional[str] = None
+    apiKey: Optional[str] = ""
+
+@app.post("/api/goal/run")
+def run_goal_endpoint(request: GoalRequest):
+    if not request.goal:
+        raise HTTPException(status_code=400, detail="Goal cannot be empty")
+    
+    return StreamingResponse(
+        runner.run_goal_autonomous(request.goal, app_id=request.appId, api_key=request.apiKey),
+        media_type="text/event-stream"
+    )
 
 # --- File System ---
 

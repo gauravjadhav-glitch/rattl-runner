@@ -11,11 +11,24 @@ import requests
 import re
 import xml.etree.ElementTree as ET
 import yaml
+from typing import List, Dict, Optional, Any
+from agents.failure_analyzer import failure_analyzer
+from agents.hybrid_resolver import hybrid_resolver
+from agents.planner_agent import planner_agent
+from agents.goal_agent import goal_agent
+from analysis.crash_analyzer import crash_analyzer
+from analysis.improver import improver
 
 # Global variables for current run tracking
 current_run_id = None
 
 _hierarchy_cache = {"data": None, "time": 0, "hash": None}
+_last_interaction_time = 0
+_native_dump_failures = 0
+
+def mark_interaction():
+    global _last_interaction_time
+    _last_interaction_time = time.time()
 
 def call_google_vision(screenshot_path, query, api_key):
     """Google Gemini Vision Implementation"""
@@ -65,7 +78,6 @@ def call_ai_vision(screenshot_path, query, api_key):
     use_google = False
     active_key = api_key
     
-    # Check Environment Fallbacks if no key passed
     if not active_key:
         if os.getenv("GOOGLE_API_KEY"):
             active_key = os.getenv("GOOGLE_API_KEY")
@@ -143,6 +155,7 @@ def run_adb(command):
     return result
 
 def tap_point(x, y):
+    mark_interaction()
     run_adb(f"shell input tap {x} {y}")
 
 def get_screen_size():
@@ -240,65 +253,95 @@ def get_screen_hash(hierarchy_data):
     full_str = "|".join(structure)
     return hashlib.md5(full_str.encode()).hexdigest()
 
-def get_hierarchy():
-    global _hierarchy_cache
+def get_hierarchy(force_refresh=False, smart_cache=False):
+    global _hierarchy_cache, _native_dump_failures
     now = time.time()
     
-    if _hierarchy_cache["data"] and (now - _hierarchy_cache["time"] < 3.0):
+    # Smart Cache: If enabled, utilize cache as long as it's newer than the last interaction
+    # This allows bulk assertions to run instantly without re-dumping
+    if smart_cache and _hierarchy_cache["data"]:
+        # Check if cache was captured AFTER the last interaction
+        if _hierarchy_cache["time"] > _last_interaction_time:
+            return _hierarchy_cache["data"]
+
+    # Standard Cache: 3 seconds (unless forced), BUT must be newer than last interaction
+    is_fresh = _hierarchy_cache["time"] > _last_interaction_time
+    if not force_refresh and _hierarchy_cache["data"] and (now - _hierarchy_cache["time"] < 3.0) and is_fresh:
         return _hierarchy_cache["data"]
 
     data = None
-    try:
-        # 1. Native ADB dump (fast)
-        # Self-healing: kill any stuck uiautomator process first
-        run_adb("shell pkill -9 uiautomator")
-        
-        # Try native dump with timeout
-        dump_proc = run_adb("shell uiautomator dump /data/local/tmp/uidump.xml")
-        
-        # If it failed, try once more after a tiny sleep
-        if dump_proc.returncode != 0:
-            time.sleep(0.5)
-            dump_proc = run_adb("shell uiautomator dump /data/local/tmp/uidump.xml")
-
-        if dump_proc.returncode == 0:
-            xml_res = run_adb("shell cat /data/local/tmp/uidump.xml")
-            xml_data = xml_res.stdout
+    
+    # Check circuit breaker
+    if _native_dump_failures < 3:
+        try:
+            # 1. Native ADB dump (fast)
+            # Self-healing: kill any stuck uiautomator process first
+            run_adb("shell pkill -9 uiautomator")
             
-            if xml_data and "<?xml" in xml_data:
-                start_xml = xml_data.find("<?xml")
-                end_xml = xml_data.rfind("</hierarchy>")
-                if start_xml != -1 and end_xml != -1:
-                    clean_xml = xml_data[start_xml:end_xml + len("</hierarchy>")]
-                    try:
-                        root = ET.fromstring(clean_xml)
-                        data = parse_xml_node(root)
-                    except: pass
+            # Try native dump with timeout
+            # Cleanup first
+            run_adb("shell rm -f /data/local/tmp/uidump.xml")
+            
+            dump_proc = run_adb("shell uiautomator dump /data/local/tmp/uidump.xml")
+            
+            # If it failed, try once more after a tiny sleep
+            if dump_proc.returncode != 0:
+                print(f"[DEBUG] Native dump failed (code {dump_proc.returncode}, stderr: {dump_proc.stderr}), retrying...")
+                time.sleep(0.5)
+                # Kill uiautomator more aggressively
+                run_adb("shell am force-stop com.github.uiautomator")
+                run_adb("shell am force-stop com.github.uiautomator.test")
+                dump_proc = run_adb("shell uiautomator dump /data/local/tmp/uidump.xml")
 
-        if not data:
-            # 2. Fallback to maestro hierarchy
-            print("[DEBUG] Native dump failed or invalid, falling back to maestro")
-            result = subprocess.run(["maestro", "hierarchy"], capture_output=True, text=True, timeout=30, env={**os.environ, "MAESTRO_OUTPUT_NO_COLOR": "true"})
-            output = result.stdout
-            start = output.find('{')
-            end = output.rfind('}')
-            if start != -1 and end != -1:
-                data = json.loads(output[start:end+1])
+            if dump_proc.returncode == 0:
+                xml_res = run_adb("shell cat /data/local/tmp/uidump.xml")
+                xml_data = xml_res.stdout
+                
+                if xml_data and "<?xml" in xml_data:
+                    start_xml = xml_data.find("<?xml")
+                    end_xml = xml_data.rfind("</hierarchy>")
+                    if start_xml != -1 and end_xml != -1:
+                        clean_xml = xml_data[start_xml:end_xml + len("</hierarchy>")]
+                        try:
+                            root = ET.fromstring(clean_xml)
+                            data = parse_xml_node(root)
+                            # Success! Reset failure count
+                            _native_dump_failures = 0
+                        except: pass
+            
+            if not data:
+                _native_dump_failures += 1
+                if _native_dump_failures >= 3:
+                     print("[DEBUG] Native dump unstable. Disabling for this session.")
 
-        if data:
-            h = get_screen_hash(data)
-            # AI Learning integration
-            intelligence.learn_screen(h, None, current_run_id or "unknown", data)
-            _hierarchy_cache = {"data": data, "time": now, "hash": h}
-            return data
+        except Exception as e:
+             _native_dump_failures += 1
+             print(f"[ERROR] Native dump error: {e}")
 
-    except Exception as e:
-        print(f"[ERROR] Hierarchy error: {e}")
+    if not data:
+        # 2. Fallback to maestro hierarchy
+        print("[DEBUG] Native dump failed/invalid/disabled, falling back to maestro")
+        result = subprocess.run(["maestro", "hierarchy"], capture_output=True, text=True, timeout=30, env={**os.environ, "MAESTRO_OUTPUT_NO_COLOR": "true"})
+        output = result.stdout
+        start = output.find('{')
+        end = output.rfind('}')
+        if start != -1 and end != -1:
+            data = json.loads(output[start:end+1])
+
+    if data:
+        h = get_screen_hash(data)
+        # AI Learning integration
+        intelligence.learn_screen(h, None, current_run_id or "unknown", data)
+        _hierarchy_cache = {"data": data, "time": now, "hash": h}
+        return data
+            
     return {"children": []}
 
 def get_current_screen_hash():
     """Helper to get the hash of the last captured hierarchy."""
-    return _hierarchy_cache.get("hash")
+    if _hierarchy_cache["time"] > _last_interaction_time:
+        return _hierarchy_cache.get("hash")
+    return None
 
 
 def get_hierarchy_json():
@@ -609,6 +652,7 @@ def perform_tap_text_only(text, root=None):
     return False
 
 def input_text(text):
+    mark_interaction()
     # Ensure it is a string if it came from a dict parameter
     if isinstance(text, dict):
         # Extract text if parameter was a dict like {text: "...", index: ...}
@@ -717,8 +761,14 @@ def wait_for_element_or_fail(query, timeout=10, step_context=None, index=None):
         msg = f"{query}[{index}]" if index is not None else query
         print(f"[DEBUG] Waiting for element: {msg} (Attempt {attempt}/2, timeout {phase_timeout}s)")
         
+        first_check = True
+
         while time.time() - start < phase_timeout:
-            root = get_hierarchy()
+            # OPTIMIZATION: On first check, try smart cache (fastest)
+            # If that fails, force a refresh immediately (to avoid waiting 3s for cache expiry)
+            is_smart = first_check and attempt == 1
+            root = get_hierarchy(smart_cache=is_smart, force_refresh=(not is_smart and first_check))
+            
             if not root:
                  print("[DEBUG] Hierarchy is None")
                  time.sleep(0.3)
@@ -751,6 +801,13 @@ def wait_for_element_or_fail(query, timeout=10, step_context=None, index=None):
                 else:
                      print(f"[DEBUG] Found '{msg}' but it is not visible/interactive. Continuing search...")
             
+            # If we failed the smart check, don't sleep - loop immediately to force refresh
+            if is_smart and first_check:
+                first_check = False
+                continue
+
+            first_check = False
+            
             # SELF-HEALING: Try fuzzy matching (only if no index)
             if index is None:
                 cached = intelligence.get_element_memory(current_hash, query)
@@ -763,6 +820,19 @@ def wait_for_element_or_fail(query, timeout=10, step_context=None, index=None):
                         if step_context:
                              intelligence.save_step_memory(step_context[0], step_context[1], healed_el["attributes"]["bounds"])
                         return healed_el
+                
+                # 3. HYBRID RESOLVER (Semantic AI Matching)
+                # Trigger this earlier if we've done at least one full hierarchy scan
+                if (attempt == 1 and time.time() - start > 5.0) or (attempt == 2):
+                    openai_key = os.getenv("RATT_OPENAI_KEY") or os.getenv("OPENAI_API_KEY")
+                    if openai_key:
+                        semantic_el = hybrid_resolver.resolve_with_json(query, root)
+                        if semantic_el:
+                            print(f"[DEBUG] 🧠 HYBRID RESOLVER: Found semantic match for '{query}'.")
+                            intelligence.remember_interaction(current_hash, query, semantic_el, success=True)
+                            if step_context:
+                                 intelligence.save_step_memory(step_context[0], step_context[1], semantic_el["attributes"]["bounds"])
+                            return semantic_el
 
             time.sleep(0.3)
         
@@ -779,12 +849,15 @@ def wait_for_element_or_fail(query, timeout=10, step_context=None, index=None):
     take_screenshot("failure_timeout")
     raise Exception(f"Element not found: {query} (index: {index}) after {phase_timeout*2}s. Analysis: {reason}")
 
-def run_test_step(step, run_id=None, step_index=None):
+def run_test_step(step, run_id=None, step_index=None, history=None):
     """Wrapper for intelligence and failure handling around step execution."""
     start_time = time.time()
     s = StepData(step)
     intent = str(step)
     action_type = s.type
+    
+    if history is None:
+        history = []
 
     # Determine Intelligence Mode
     mode = "LEARN"
@@ -839,7 +912,8 @@ def run_test_step(step, run_id=None, step_index=None):
             if run_id:
                 intelligence.record_action(run_id, action_type, intent, "SUCCESS", duration)
                 
-            return result
+            yield f"RETURN:{result}"
+            return
 
         except Exception as e:
             attempts += 1
@@ -856,12 +930,55 @@ def run_test_step(step, run_id=None, step_index=None):
                     error_msg, 
                     {"ui_hash": current_hash or "unknown", "hierarchy": root or {}}
                 )
+
+                # NEW: AI Deep Analysis
+                yield "[AI-BOT] Deep Analysis triggered..."
+                # 1. Check for Crash first (FAST)
+                is_crash = crash_analyzer.is_crash(error_msg)
+                
+                # 2. Capture state for LLM 
+                # (We already have root/current_hash, lets get history)
+                # history is passed from argument
+                xml_str = json.dumps(root) if root else ""
+                
+                # 3. Ask the Bot
+                ai_analysis = failure_analyzer.analyze(
+                   step=s.raw,
+                   error=error_msg,
+                   xml_hierarchy=xml_str,
+                   history=history
+                )
+                
+                if ai_analysis:
+                   yield f"[AI-BOT] Analysis: {ai_analysis.get('failure_type')} - {ai_analysis.get('root_cause')}"
+                   
+                   # Merge AI diagnosis into existing analysis object for reporting
+                   analysis["ai_diagnosis"] = ai_analysis
+                   
+                   # Check if LLM suggested a fix that Healer missed
+                   if ai_analysis.get("suggested_fix") and not analysis.get("healed"):
+                        bfix = ai_analysis["suggested_fix"]
+                        yield f"[AI-BOT] Suggested Fix: {bfix}"
+                        
+                        # Apply fix to params dynamically
+                        if bfix.get("action") == "replace_locator":
+                             val = bfix["value"]
+                             if bfix.get("locator_type") == "text":
+                                  if isinstance(s.params, dict): s.params['text'] = val
+                                  else: s.params = val
+                             elif "id" in bfix.get("locator_type", ""):
+                                  if isinstance(s.params, dict): s.params['id'] = val
+                                  else: s.params = f"id:{val}"
+                             
+                             # Set flag to retry with new params
+                             analysis["healed"] = True
+                             analysis["suggested_fix"] = {"type": bfix.get("locator_type"), "value": val}
             
             # HEALING LOGIC: Can we retry?
             if attempts < max_attempts and analysis and analysis.get("healed"):
                 fix = analysis.get("suggested_fix")
                 if fix:
-                    print(f"[HEALER] Attempting auto-fix: {fix['value']}")
+                    yield f"[HEALER] Attempting auto-fix: {fix['value']}"
                     # Update step data for retry
                     if fix['type'] == 'text':
                         if isinstance(s.params, dict): s.params['text'] = fix['value']
@@ -981,13 +1098,19 @@ def _dispatch_step_logic(s, step_context=None):
                      if perform_tap_text_only(eq, root):
                          return f"Tap '{eq}' (via variation fallback)"
 
-            api_key = os.getenv("RATT_OPENAI_KEY") or os.getenv("OPENAI_API_KEY")
+            # Fallback: AI Vision
+            api_key = os.getenv("RATT_OPENAI_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("GOOGLE_API_KEY")
             if api_key:
-                snap_path = take_screenshot("vision_check")
-                coords = call_ai_vision(snap_path, query, api_key)
-                if coords:
-                    run_adb(f"shell input tap {coords[0]} {coords[1]}")
-                    return f"Tap '{query}' (via AI Vision)"
+                print(f"[DEBUG] Element '{query}' not found via hierarchy. Trying AI Vision...")
+                try:
+                    snap_path = take_screenshot("vision_check")
+                    coords = call_ai_vision(snap_path, query, api_key)
+                    if coords:
+                        run_adb(f"shell input tap {coords[0]} {coords[1]}")
+                        return f"Tap '{query}' (via AI Vision)"
+                except Exception as vision_err:
+                    print(f"[DEBUG] AI Vision failed: {vision_err}")
+            
             raise Exception(f"Element '{query}' not found. {str(e)}")
 
     elif s.type == "assertVisible":
@@ -1013,6 +1136,7 @@ def _dispatch_step_logic(s, step_context=None):
         return f"Assert Not Visible: '{query}'"
 
     elif s.type == "back":
+        mark_interaction()
         run_adb("shell input keyevent 4")
         return "Pressed Back"
 
@@ -1079,6 +1203,7 @@ def _dispatch_step_logic(s, step_context=None):
         key = s.params
         key_map = {"Enter": "66", "Back": "4", "Home": "3"}
         code = key_map.get(key, key)
+        mark_interaction()
         run_adb(f"shell input keyevent {code}")
         return f"Key: {key}"
 
@@ -1092,6 +1217,7 @@ def _dispatch_step_logic(s, step_context=None):
         return "Hide Keyboard"
 
     elif s.type == "scroll":
+        mark_interaction()
         direction = "DOWN"
         query = None
         if isinstance(s.params, dict):
@@ -1188,6 +1314,7 @@ def _dispatch_step_logic(s, step_context=None):
         return f"Scrolled {direction} to find '{query}'"
 
     elif s.type == "swipe":
+        mark_interaction()
         direction = "LEFT"
         duration = 500
         query = None
@@ -1276,19 +1403,35 @@ def _dispatch_step_logic(s, step_context=None):
     return f"Skipped {s.type}"
 
 def execute_flow(flow, global_app_id, run_id=None):
+    history = []
     for i, step in enumerate(flow):
         # Inject appId if needed
         if isinstance(step, dict) and "launchApp" in step:
             if isinstance(step["launchApp"], dict) and "appId" not in step["launchApp"] and global_app_id:
                 step["launchApp"]["appId"] = global_app_id
 
-        
         try:
             # Send 'running' status before starting the step
             yield f"data: [{i+1}/{len(flow)}] step (running)\n\n"
-            log = run_test_step(step, run_id=run_id, step_index=i)
+            
+            # Consume generator from run_test_step
+            log = "Step Completed"
+            for msg in run_test_step(step, run_id=run_id, step_index=i, history=history):
+                if msg.startswith("RETURN:"):
+                    log = msg.replace("RETURN:", "", 1)
+                elif msg.startswith("[AI-BOT]"):
+                    yield f"data: {msg}\n\n"
+                elif msg.startswith("[HEALER]"):
+                    yield f"data: {msg}\n\n"
+                else:
+                    # Debug logs or others
+                    print(msg) 
+            
+            # Record step to history
+            history.append({"step": step, "log": log, "status": "PASS"})
             yield f"data: [{i+1}/{len(flow)}] {log} (completed)\n\n"
         except Exception as e:
+            history.append({"step": step, "error": str(e), "status": "FAIL"})
             yield f"data: [{i+1}/{len(flow)}] {str(e)} (failed)\n\n"
             raise e
 
@@ -1327,6 +1470,27 @@ def run_yaml_custom(yaml_content, api_key=None, filename=""):
         current_run_id = run_id
         start_time = time.time()
         
+        # AI PLANNER: Analyze test flow before execution
+        try:
+            from agents.planner_agent import planner_agent
+            
+            # Get memory stats for this test
+            memory_stats = {
+                "previous_runs": len([r for r in intelligence.raw_data["runs"] if r.get("test_name") == run_name]),
+                "mode": mode
+            }
+            
+            plan = planner_agent.plan_execution(flow, memory_stats)
+            if plan:
+                yield f"data: [AI-PLANNER] 🎯 Execution Plan Generated:\n\n"
+                yield f"data: [AI-PLANNER] - Risk Level: {plan.get('risk_level', 'UNKNOWN')} (Score: {plan.get('risk_score', 0)})\n\n"
+                yield f"data: [AI-PLANNER] - Mode: {plan.get('execution_mode', 'NORMAL')}\n\n"
+                yield f"data: [AI-PLANNER] - Reasoning: {plan.get('reasoning', 'N/A')}\n\n"
+                if plan.get('potential_flaky_steps'):
+                    yield f"data: [AI-PLANNER] - ⚠️  Potentially Flaky Steps: {plan.get('potential_flaky_steps')}\n\n"
+        except Exception as e:
+            print(f"[DEBUG] Planner Agent failed: {e}")
+        
         try:
             for msg in execute_flow(flow, global_app_id, run_id=run_id):
                 yield msg
@@ -1334,6 +1498,17 @@ def run_yaml_custom(yaml_content, api_key=None, filename=""):
             # AI RUN TRACKING: End Run (Pass)
             duration = int((time.time() - start_time) * 1000)
             intelligence.end_run(run_id, "PASS", duration)
+            
+            # AI IMPROVER: Check for suggestions
+            try:
+                suggestions = improver.analyze_memory(intelligence.storage_path)
+                if suggestions:
+                    yield f"data: [AI-IMPROVER] 💡 Found {len(suggestions)} Improvement Suggestions:\n\n"
+                    for s in suggestions:
+                        yield f"data: [AI-IMPROVER] - {s['type']}: {s['suggestion']} ({s.get('metric', '')})\n\n"
+            except Exception as e:
+                print(f"[DEBUG] Improver failed: {e}")
+
             yield f"data: [DONE] EXIT_CODE: 0\n\n"
             yield f"data: [REPORT] Run ID: {run_id}\n\n"
         except Exception as e:
@@ -1395,3 +1570,80 @@ def run_folder_custom(folder_path):
 
     except Exception as e:
         yield f"data: [ERROR] {str(e)}\n\n"
+def run_goal_autonomous(goal: str, app_id: Optional[str] = None, api_key: Optional[str] = None):
+    """
+    Autonomous loop: 
+    1. Observe Screen
+    2. Plan Step
+    3. Execute
+    4. Repeat until Goal Reached or Max Steps (15)
+    """
+    if api_key:
+        os.environ["RATT_OPENAI_KEY"] = api_key
+
+    history = []
+    max_steps = 15
+    run_id = intelligence.start_run(f"Goal: {goal[:20]}...", mode="LEARN")
+    global current_run_id
+    current_run_id = run_id
+    
+    yield f"data: [STARTING] Autonomous Goal Run: '{goal}'\n\n"
+    
+    if app_id:
+        yield f"data: [INFO] Launching app '{app_id}'...\n\n"
+        # Use run_test_step to launch properly
+        launch_step = {"launchApp": {"appId": app_id, "clearState": True}}
+        for msg in run_test_step(launch_step, run_id=run_id):
+            if not msg.startswith("RETURN:"):
+                yield f"data: {msg}\n\n"
+    
+    for i in range(max_steps):
+        yield f"data: [GOAL-AGENT] Step {i+1}: Observing screen...\n\n"
+        hierarchy = get_hierarchy(force_refresh=True)
+        
+        plan_res = goal_agent.plan_steps(goal, hierarchy, history)
+        explanation = plan_res.get("explanation", "Thinking...")
+        yield f"data: [GOAL-AGENT] 🧠 {explanation}\n\n"
+        
+        if plan_res.get("is_goal_reached"):
+            yield f"data: [SUCCESS] Goal Reached! 🎉\n\n"
+            intelligence.end_run(run_id, "PASS", 0)
+            yield f"data: [DONE] EXIT_CODE: 0\n\n"
+            return
+
+        steps = plan_res.get("plan", [])
+        if not steps:
+            yield f"data: [ERROR] Goal Agent stuck: No steps generated.\n\n"
+            intelligence.end_run(run_id, "FAIL", 0)
+            yield f"data: [DONE] EXIT_CODE: 1\n\n"
+            return
+
+        # Execute planned steps
+        for step in steps:
+            # Prepare step context for intelligence
+            yield f"data: [EXEC] Action: {json.dumps(step)}\n\n"
+            
+            try:
+                res_msg = "Completed"
+                for msg in run_test_step(step, run_id=run_id, step_index=i, history=history):
+                    if msg.startswith("RETURN:"):
+                        res_msg = msg.replace("RETURN:", "", 1)
+                    else:
+                        yield f"data: {msg}\n\n"
+                
+                history.append({"action": step, "result": res_msg})
+                
+                # RE-OBSERVE: After each action, the screen might change.
+                # If we have more steps planned, we should ideally verify if they still make sense
+                # or just break and let the outer loop re-plan from the new state.
+                break # Favor re-planning after every single action for max robustness.
+
+            except Exception as e:
+                yield f"data: [ERROR] Step failed: {str(e)}\n\n"
+                intelligence.end_run(run_id, "FAIL", 0)
+                yield f"data: [DONE] EXIT_CODE: 1\n\n"
+                return
+
+    yield f"data: [ERROR]Reached max steps ({max_steps}) without hitting goal.\n\n"
+    intelligence.end_run(run_id, "FAIL", 0)
+    yield f"data: [DONE] EXIT_CODE: 1\n\n"

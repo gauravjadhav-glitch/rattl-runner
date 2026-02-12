@@ -137,6 +137,7 @@ function App() {
     const [deviceConnected, setDeviceConnected] = useState(false);
     const [isRunning, setIsRunning] = useState(false);
     const [refreshKey, setRefreshKey] = useState(0);
+    const [hasAutoLoaded, setHasAutoLoaded] = useState(false);
     const [packages, setPackages] = useState([]);
     const [expandedFolders, setExpandedFolders] = useState(new Set());
     const [lineStatuses, setLineStatuses] = useState({}); // line# -> 'pass' | 'fail' | 'running'
@@ -160,20 +161,14 @@ function App() {
     const [showSettings, setShowSettings] = useState(false);
     const [apiKey, setApiKey] = useState(localStorage.getItem('openai_api_key') || '');
     const [aiPrompt, setAiPrompt] = useState('');
-    const [agentIntelligence, setAgentIntelligence] = useState(null);
     const [activeTab, setActiveTab] = useState('inspector');
-    const [selectedRunId, setSelectedRunId] = useState(null);
-    const [showReportModal, setShowReportModal] = useState(false);
-    const [currentReport, setCurrentReport] = useState(null);
+    const [goalText, setGoalText] = useState('');
+    const [goalAppId, setGoalAppId] = useState('');
+    const [showGoalPackageDropdown, setShowGoalPackageDropdown] = useState(false);
+    const [isGoalRunning, setIsGoalRunning] = useState(false);
     const [showPackageDropdown, setShowPackageDropdown] = useState(false);
+    const [isFetchingPackages, setIsFetchingPackages] = useState(false);
 
-    const fetchIntelligence = async () => {
-        try {
-            const res = await fetch(`${apiBaseUrl}/api/intelligence/stats`);
-            const data = await res.json();
-            setAgentIntelligence(data);
-        } catch (e) { console.error(e); }
-    };
 
     // Custom Modal States
     const [fileToDelete, setFileToDelete] = useState(null);
@@ -198,6 +193,7 @@ function App() {
 
     const terminalEndRef = useRef(null);
     const lineNumbersRef = useRef(null);
+    const goalAbortControllerRef = useRef(null);
 
     // For Line Numbers
     const countLines = (text) => text.split('\n').length;
@@ -314,11 +310,10 @@ function App() {
         }
     }, [deviceConnected]);
 
+
     // Sequential polling handler: Only fetch next frame after current one is loaded
     const onScreenLoad = () => {
         if (deviceConnected) {
-            // Sequential polling: trigger one update after the other
-            // but with a small throttle cap if needed
             setRefreshKey(prev => prev + 1);
         }
     };
@@ -374,7 +369,24 @@ function App() {
         try {
             const res = await fetch(`${apiBaseUrl}/files`);
             const data = await res.json();
-            setFiles(data.files || []);
+            const fileList = data.files || [];
+
+            // Sort by modification time descending if available, else standard sort
+            // Assuming backend provides mtime. If not, we take the list as is.
+            // For now, let's just use the first file if available.
+            setFiles(fileList);
+
+            // Auto-load the most recent file if none selected
+            if (!currentFile && !hasAutoLoaded && fileList.length > 0) {
+                // Find the first actual file (not folder) in the flattened list
+                // Since the fileList structure might be flat or nested, we'll try to find a .yaml file
+                const firstYaml = fileList.find(f => f.name.endsWith('.yaml') || f.name.endsWith('.yml'));
+
+                if (firstYaml) {
+                    loadFile(firstYaml);
+                    setHasAutoLoaded(true);
+                }
+            }
         } catch (e) {
             console.error(e);
         }
@@ -456,6 +468,7 @@ function App() {
     };
 
     const fetchPackages = async () => {
+        setIsFetchingPackages(true);
         try {
             const res = await fetch(`${apiBaseUrl}/packages`);
             if (!res.ok) throw new Error('Failed to fetch packages');
@@ -464,6 +477,8 @@ function App() {
             setPackages(pkgs);
         } catch (e) {
             console.error('Fetch packages error:', e);
+        } finally {
+            setIsFetchingPackages(false);
         }
     };
 
@@ -567,13 +582,6 @@ function App() {
         }
     }, [activeTerminalTab]);
 
-    useEffect(() => {
-        if (activeTab === 'intelligence') {
-            fetchIntelligence();
-            const interval = setInterval(fetchIntelligence, 5000);
-            return () => clearInterval(interval);
-        }
-    }, [activeTab]);
 
     const executeCommand = async (cmd) => {
         if (!cmd) return;
@@ -911,6 +919,12 @@ function App() {
         }
     };
 
+    useEffect(() => {
+        if (activeTab === 'goal' && !goalAppId && modalData.appId) {
+            setGoalAppId(modalData.appId);
+        }
+    }, [activeTab, modalData.appId]);
+
     const runTest = async () => {
         if (!currentFile) return;
 
@@ -1020,7 +1034,17 @@ function App() {
                     // Parse test progress: [1/5] Step name (completed/failed/running)
                     // Improved regex to handle messages with parentheses like "Launch (cleared state)"
                     const match = text.match(/\[(\d+)\/(\d+)\]\s+(.*)\s+\((running|completed|failed)\)$/);
-                    if (match) {
+
+                    if (text.startsWith('[AI-BOT]')) {
+                        addLog('ai-bot', text.replace('[AI-BOT]', '').trim());
+                        continue;
+                    } else if (text.startsWith('[AI-IMPROVER]')) {
+                        addLog('ai-improver', text.replace('[AI-IMPROVER]', '').trim());
+                        continue;
+                    } else if (text.startsWith('[AI-PLANNER]')) {
+                        addLog('ai-planner', text.replace('[AI-PLANNER]', '').trim());
+                        continue;
+                    } else if (match) {
                         const stepIdx = parseInt(match[1], 10) - 1;
                         const status = match[4].toLowerCase().trim(); // Group 4 is now the status
                         const stepDetail = match[3];
@@ -1051,6 +1075,152 @@ function App() {
         } finally {
             setIsRunning(false);
             abortControllerRef.current = null;
+        }
+    };
+
+    const runGoal = async (goal) => {
+        if (!goal) return;
+        if (!goalAppId) {
+            addLog('error', '⚠️ Target App ID is mandatory for Goal Mode');
+            return;
+        }
+
+        // Cancel previous if running
+        if (goalAbortControllerRef.current) {
+            goalAbortControllerRef.current.abort();
+        }
+
+        const controller = new AbortController();
+        goalAbortControllerRef.current = controller;
+
+        setIsGoalRunning(true);
+        setActiveTerminalTab('OUTPUT');
+        addLog('ai-bot', `🎯 Goal Decided: ${goal}`);
+
+        // 1. Create a new file for this goal session
+        const timestamp = Date.now();
+        // find a unique name like new_goal_0.yaml
+        let counter = 0;
+        let fileName = `new_goal_${counter}.yaml`;
+        while (files.some(f => f.name === fileName)) {
+            counter++;
+            fileName = `new_goal_${counter}.yaml`;
+        }
+
+        const initialContent = `appId: ${goalAppId}\n---\n- launchApp:\n    clearState: true\n`;
+
+        try {
+            // Create the file via backend API (reuse logic similar to saveFile or use new endpoint if needed)
+            // Just using a direct write if possible or mimicking save
+            const createRes = await fetch(`${apiBaseUrl}/files`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    path: `test-flows/${fileName}`, // Assuming standard folder
+                    content: initialContent,
+                    type: 'file'
+                })
+            });
+
+            if (createRes.ok) {
+                const newFile = { name: fileName, path: `test-flows/${fileName}`, type: 'file' };
+                // Manually update file list state locally to reflect immediately
+                setFiles(prev => [...prev, newFile]);
+                // Load it
+                setCurrentFile(newFile);
+                setEditorContent(initialContent);
+                addLog('info', `Created new goal file: ${fileName}`);
+            }
+
+            const response = await fetch(`${apiBaseUrl}/api/goal/run`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ goal, appId: goalAppId, apiKey, currentFile: fileName }),
+                signal: controller.signal
+            });
+
+            if (!response.ok) {
+                const errData = await response.json();
+                addLog('error', errData.detail || "Goal failed to start");
+                return;
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n\n');
+                buffer = lines.pop() || '';
+
+                for (const rawLine of lines) {
+                    if (!rawLine.startsWith('data: ')) continue;
+                    const text = rawLine.replace('data: ', '').trim();
+
+                    if (text.startsWith('[DONE] EXIT_CODE:')) {
+                        const code = text.split(': ')[1];
+                        if (code === '0') addLog('success', 'Goal Reached Successfully ✨');
+                        else addLog('error', `Goal Failed (Exit Code: ${code})`);
+                        // Force break to trigger finally block and stop running
+                        break;
+                    }
+
+                    if (text.startsWith('[ERROR]')) {
+                        addLog('error', text.replace('[ERROR]', ''));
+                        continue;
+                    }
+
+                    if (text.startsWith('[GOAL-AGENT]')) {
+                        addLog('ai-bot', text.replace('[GOAL-AGENT]', '').trim());
+                    } else if (text.startsWith('[EXEC]')) {
+                        const execStep = text.replace('[EXEC]', '').trim();
+                        addLog('info', execStep);
+
+                        // Append step to editor content dynamically
+                        // Append step to editor content dynamically AND save to file
+                        setEditorContent(prev => {
+                            const newContent = prev.endsWith('\n') ? `${prev}- ${execStep}\n` : `${prev}\n- ${execStep}\n`;
+
+                            // Auto-save logic
+                            const saveContent = newContent;
+                            // Trigger save explicitly with the NEW content
+                            // We can use the existing saveFile logic but tailored to avoid stale state issues or just direct fetch
+                            fetch(`${apiBaseUrl}/file`, {
+                                method: 'PUT',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ path: `test-flows/${fileName}`, content: saveContent })
+                            }).catch(err => console.error("Auto-save failed:", err));
+
+                            return newContent;
+                        });
+                    } else {
+                        // Generic status updates
+                        if (text.includes("completed")) addLog('success', text);
+                        else if (text.includes("failed")) addLog('error', text);
+                        else addLog('info', text);
+                    }
+                }
+            }
+        } catch (error) {
+            if (error.name === 'AbortError') {
+                addLog('info', '🛑 Goal execution stopped by user.');
+            } else {
+                addLog('error', `Autonomous engine error: ${error.message}`);
+            }
+        } finally {
+            setIsGoalRunning(false);
+            goalAbortControllerRef.current = null;
+        }
+    };
+
+    const stopGoal = () => {
+        if (goalAbortControllerRef.current) {
+            goalAbortControllerRef.current.abort();
+            setIsGoalRunning(false);
         }
     };
 
@@ -1950,7 +2120,7 @@ function App() {
                                 display: 'flex',
                                 flexDirection: 'row',
                                 justifyContent: 'center',
-                                alignItems: 'start',
+                                alignItems: 'center',
                                 gap: '24px',
                                 height: 'calc(100% - 40px)',
                                 width: '100%',
@@ -2049,165 +2219,194 @@ function App() {
                                             🔍 INSPECTOR
                                         </button>
                                         <button
-                                            onClick={() => { setActiveTab('intelligence'); fetchIntelligence(); }}
+                                            onClick={() => setActiveTab('goal')}
                                             style={{
                                                 flex: 1, padding: '12px', fontSize: '11px', fontWeight: 700,
-                                                color: activeTab === 'intelligence' ? '#a78bfa' : '#666',
-                                                borderBottom: activeTab === 'intelligence' ? '2px solid #a78bfa' : 'none',
+                                                color: activeTab === 'goal' ? '#10b981' : '#666',
+                                                borderBottom: activeTab === 'goal' ? '2px solid #10b981' : 'none',
                                                 background: 'transparent', border: 'none', cursor: 'pointer', transition: '0.2s'
                                             }}
                                         >
-                                            🧠 AGENT BRAIN
+                                            🎯 GOAL MODE
                                         </button>
                                     </div>
 
                                     <div style={{ flex: 1, overflowY: 'auto', padding: '16px' }} className="custom-scrollbar">
-                                        {activeTab === 'intelligence' ? (
-                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-                                                {/* 1. Header & Confidence Trend */}
+                                        {activeTab === 'goal' ? (
+                                            <div style={{ padding: '0px' }}>
                                                 <div style={{
-                                                    background: 'linear-gradient(135deg, rgba(167, 139, 250, 0.1) 0%, rgba(139, 92, 246, 0.05) 100%)',
-                                                    padding: '24px', borderRadius: '16px', border: '1px solid rgba(167, 139, 250, 0.2)',
-                                                    position: 'relative', overflow: 'hidden'
+                                                    background: 'rgba(16, 185, 129, 0.05)',
+                                                    border: '1px solid rgba(16, 185, 129, 0.2)',
+                                                    borderRadius: '16px',
+                                                    padding: '24px',
+                                                    marginBottom: '24px',
+                                                    position: 'relative',
+                                                    overflow: 'hidden'
                                                 }}>
-                                                    <div style={{ position: 'absolute', top: '-20px', right: '-20px', width: '100px', height: '100px', background: 'var(--accent)', filter: 'blur(60px)', opacity: 0.2 }}></div>
+                                                    <div style={{ position: 'absolute', top: '-10px', right: '-10px', width: '60px', height: '60px', background: '#10b981', filter: 'blur(40px)', opacity: 0.1 }}></div>
 
-                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
-                                                        <div>
-                                                            <div style={{ fontSize: '10px', color: '#a78bfa', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Intelligence Confidence</div>
-                                                            <div style={{ fontSize: '36px', fontWeight: 900, color: '#fff', marginTop: '4px' }}>
-                                                                {(() => {
-                                                                    const runs = agentIntelligence?.runs || [];
-                                                                    if (runs.length === 0) return 0;
-                                                                    return Math.round(runs[runs.length - 1].confidence_score * 100);
-                                                                })()}
-                                                                <span style={{ fontSize: '16px', opacity: 0.5, fontWeight: 500 }}>%</span>
-                                                            </div>
-                                                        </div>
-                                                        <div style={{ textAlign: 'right' }}>
-                                                            <div style={{ fontSize: '9px', color: '#666', fontWeight: 700 }}>STABILITY</div>
-                                                            <div style={{ fontSize: '11px', color: '#10b981', fontWeight: 600 }}>+2.4% vs last run</div>
-                                                        </div>
+                                                    <div style={{ fontSize: '14px', fontWeight: 800, marginBottom: '6px', color: '#fff' }}>Autonomous Agent</div>
+                                                    <div style={{ fontSize: '11px', color: '#888', marginBottom: '16px', lineHeight: '1.5' }}>
+                                                        The agent will observe the screen, plan steps, and navigate autonomously.
                                                     </div>
 
-                                                    {/* Confidence Sparkline (SVG) */}
-                                                    <div style={{ height: '40px', width: '100%', marginBottom: '8px' }}>
-                                                        <svg width="100%" height="40" preserveAspectRatio="none">
-                                                            <defs>
-                                                                <linearGradient id="lineGrad" x1="0" y1="0" x2="0" y2="1">
-                                                                    <stop offset="0%" stopColor="#a78bfa" stopOpacity="0.5" />
-                                                                    <stop offset="100%" stopColor="#a78bfa" stopOpacity="0" />
-                                                                </linearGradient>
-                                                            </defs>
-                                                            {(() => {
-                                                                const runs = agentIntelligence?.runs || [];
-                                                                if (runs.length < 2) return null;
-                                                                const scores = runs.slice(-10).map(r => r.confidence_score * 40);
-                                                                const width = 100 / (scores.length - 1);
-                                                                const path = `M 0,${40 - scores[0]} ` + scores.map((s, i) => `L ${i * width}%,${40 - s}`).join(' ');
-                                                                const areaPath = path + ` L 100%,40 L 0,40 Z`;
-                                                                return (
-                                                                    <>
-                                                                        <path d={areaPath} fill="url(#lineGrad)" />
-                                                                        <path d={path} fill="none" stroke="#a78bfa" strokeWidth="2" strokeLinejoin="round" />
-                                                                    </>
-                                                                );
-                                                            })()}
-                                                        </svg>
-                                                    </div>
-                                                </div>
-
-                                                {/* 2. Core Stats Grid */}
-                                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                                                    <div style={{ background: 'rgba(255,255,255,0.02)', padding: '16px', borderRadius: '12px', border: '1px solid var(--border)' }}>
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                                                            <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#10b981' }}></div>
-                                                            <span style={{ fontSize: '9px', color: '#666', fontWeight: 800, textTransform: 'uppercase' }}>Auto-Healed</span>
-                                                        </div>
-                                                        <div style={{ fontSize: '24px', fontWeight: 900, color: '#fff' }}>{agentIntelligence?.healed_count || 0}</div>
-                                                        <div style={{ fontSize: '10px', color: '#444', marginTop: '2px' }}>Events recorded</div>
-                                                    </div>
-                                                    <div style={{ background: 'rgba(255,255,255,0.02)', padding: '16px', borderRadius: '12px', border: '1px solid var(--border)' }}>
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                                                            <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#a78bfa' }}></div>
-                                                            <span style={{ fontSize: '9px', color: '#666', fontWeight: 800, textTransform: 'uppercase' }}>Memory Size</span>
-                                                        </div>
-                                                        <div style={{ fontSize: '24px', fontWeight: 900, color: '#fff' }}>{Object.keys(agentIntelligence?.screens || {}).length}</div>
-                                                        <div style={{ fontSize: '10px', color: '#444', marginTop: '2px' }}>Learned screens</div>
-                                                    </div>
-                                                </div>
-
-                                                {/* 3. Healing Timeline */}
-                                                <div>
-                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                                                        <div style={{ fontSize: '10px', fontWeight: 800, color: '#fff', textTransform: 'uppercase', letterSpacing: '0.08em' }}>🧠 Healing Timeline</div>
-                                                        <div style={{ fontSize: '9px', color: 'var(--accent)', fontWeight: 700 }}>LIVE</div>
-                                                    </div>
-                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                                                        {agentIntelligence?.failures?.filter(f => f.healed).slice(-5).reverse().map((fail, i) => (
-                                                            <div key={fail.failure_id} style={{
-                                                                padding: '12px', background: 'rgba(16, 185, 129, 0.05)', borderRadius: '8px', borderLeft: '3px solid #10b981',
-                                                                position: 'relative'
-                                                            }}>
-                                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '4px' }}>
-                                                                    <div style={{ fontSize: '11px', fontWeight: 700, color: '#fff' }}>Auto-Heal: {fail.reason}</div>
-                                                                    <div style={{ fontSize: '9px', color: '#666' }}>{new Date().toLocaleTimeString()}</div>
-                                                                </div>
-                                                                <div style={{ fontSize: '11px', color: '#888', fontStyle: 'italic', marginBottom: '4px' }}>"{fail.notes}"</div>
-                                                                <div style={{ display: 'flex', gap: '6px' }}>
-                                                                    <span style={{ fontSize: '9px', background: 'rgba(255,255,255,0.05)', color: '#aaa', padding: '2px 6px', borderRadius: '4px' }}>Mode: LEARN</span>
-                                                                    <span style={{ fontSize: '9px', background: 'rgba(16, 185, 129, 0.1)', color: '#10b981', padding: '2px 6px', borderRadius: '4px' }}>+0.01 Confidence</span>
-                                                                </div>
-                                                            </div>
-                                                        ))}
-                                                        {(!agentIntelligence?.failures || agentIntelligence.failures.filter(f => f.healed).length === 0) && (
-                                                            <div style={{ padding: '24px', textAlign: 'center', border: '1px dashed var(--border)', borderRadius: '12px', opacity: 0.5 }}>
-                                                                <div style={{ fontSize: '11px' }}>No healing events yet. The agent is strictly validating flows.</div>
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                </div>
-
-                                                {/* 4. Run History Table */}
-                                                <div>
-                                                    <div style={{ fontSize: '10px', fontWeight: 800, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '12px' }}>Recent Test Runs</div>
-                                                    <div style={{ borderRadius: '12px', border: '1px solid var(--border)', overflow: 'hidden' }}>
-                                                        {agentIntelligence?.runs?.slice(-5).reverse().map((run, i) => (
-                                                            <div key={run.run_id} style={{
-                                                                padding: '12px', borderBottom: i === 4 ? 'none' : '1px solid var(--border)',
-                                                                background: 'rgba(255,255,255,0.01)', display: 'flex', justifyContent: 'space-between', alignItems: 'center'
-                                                            }}>
-                                                                <div>
-                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                                        <div style={{ fontSize: '11px', fontWeight: 700 }}>{run.test_name}</div>
-                                                                        <div style={{ fontSize: '9px', background: run.status === 'PASS' ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)', color: run.status === 'PASS' ? '#10b981' : '#ef4444', padding: '1px 6px', borderRadius: '4px' }}>{run.status}</div>
+                                                    <div style={{ marginBottom: '16px' }}>
+                                                        <div style={{ fontSize: '10px', color: '#666', fontWeight: 800, marginBottom: '6px', textTransform: 'uppercase' }}>Target App ID (Mandatory)</div>
+                                                        <div style={{ position: 'relative', display: 'flex', gap: '8px' }}>
+                                                            <div style={{ flex: 1, position: 'relative' }}>
+                                                                <input
+                                                                    type="text"
+                                                                    value={goalAppId}
+                                                                    onChange={(e) => {
+                                                                        setGoalAppId(e.target.value);
+                                                                        setShowGoalPackageDropdown(true);
+                                                                    }}
+                                                                    onFocus={() => setShowGoalPackageDropdown(true)}
+                                                                    onBlur={() => setTimeout(() => setShowGoalPackageDropdown(false), 300)}
+                                                                    placeholder="e.g. com.Dominos"
+                                                                    style={{
+                                                                        width: '100%',
+                                                                        background: 'rgba(0,0,0,0.3)',
+                                                                        border: '1px solid var(--border)',
+                                                                        borderRadius: '8px',
+                                                                        padding: '10px',
+                                                                        color: '#fff',
+                                                                        fontSize: '12px',
+                                                                        outline: 'none'
+                                                                    }}
+                                                                />
+                                                                {showGoalPackageDropdown && packages.length > 0 && (
+                                                                    <div style={{
+                                                                        position: 'absolute',
+                                                                        top: '100%',
+                                                                        left: 0,
+                                                                        right: 0,
+                                                                        maxHeight: '150px',
+                                                                        overflowY: 'auto',
+                                                                        background: '#1a1a1a',
+                                                                        border: '1px solid var(--border)',
+                                                                        borderRadius: '8px',
+                                                                        marginTop: '4px',
+                                                                        zIndex: 100,
+                                                                        boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+                                                                    }} className="custom-scrollbar">
+                                                                        {packages
+                                                                            .filter(pkg => pkg.toLowerCase().includes((goalAppId || '').toLowerCase()))
+                                                                            .slice(0, 20)
+                                                                            .map(pkg => (
+                                                                                <div
+                                                                                    key={pkg}
+                                                                                    onMouseDown={() => {
+                                                                                        setGoalAppId(pkg);
+                                                                                        setShowGoalPackageDropdown(false);
+                                                                                    }}
+                                                                                    style={{
+                                                                                        padding: '8px 12px',
+                                                                                        cursor: 'pointer',
+                                                                                        fontSize: '11px',
+                                                                                        color: '#bbb',
+                                                                                        borderBottom: '1px solid rgba(255,255,255,0.05)'
+                                                                                    }}
+                                                                                    onMouseEnter={(e) => e.target.style.background = 'rgba(16, 185, 129, 0.1)'}
+                                                                                    onMouseLeave={(e) => e.target.style.background = 'transparent'}
+                                                                                >
+                                                                                    {pkg}
+                                                                                </div>
+                                                                            ))
+                                                                        }
                                                                     </div>
-                                                                    <div style={{ fontSize: '10px', color: '#555' }}>ID: {run.run_id} • {(run.execution_time_ms / 1000).toFixed(1)}s</div>
-                                                                </div>
-                                                                <div style={{ textAlign: 'right' }}>
-                                                                    <div style={{ fontSize: '12px', fontWeight: 700, color: '#fff' }}>{Math.round(run.confidence_score * 100)}%</div>
-                                                                    <div style={{ fontSize: '9px', color: '#444' }}>Confidence</div>
-                                                                    <button
-                                                                        onClick={async () => {
-                                                                            try {
-                                                                                const res = await fetch(`${apiBaseUrl}/report/${run.run_id}`);
-                                                                                const report = await res.json();
-                                                                                setCurrentReport(report);
-                                                                                setShowReportModal(true);
-                                                                            } catch (err) {
-                                                                                console.error('Failed to fetch report:', err);
-                                                                            }
-                                                                        }}
-                                                                        style={{ marginTop: '8px', fontSize: '9px', background: 'rgba(167, 139, 250, 0.1)', color: '#a78bfa', border: '1px solid rgba(167, 139, 250, 0.2)', padding: '2px 6px', borderRadius: '4px', cursor: 'pointer' }}>
-                                                                        View Report
-                                                                    </button>
-                                                                </div>
+                                                                )}
                                                             </div>
-                                                        ))}
-                                                        {(!agentIntelligence?.runs || agentIntelligence.runs.length === 0) && (
-                                                            <div style={{ padding: '20px', textAlign: 'center', fontSize: '11px', color: '#666' }}>No runs recorded.</div>
+                                                            <button
+                                                                onClick={fetchPackages}
+                                                                disabled={isFetchingPackages}
+                                                                style={{
+                                                                    background: 'rgba(255,255,255,0.05)',
+                                                                    border: '1px solid var(--border)',
+                                                                    borderRadius: '8px',
+                                                                    padding: '0 10px',
+                                                                    color: '#888',
+                                                                    cursor: 'pointer'
+                                                                }}
+                                                            >
+                                                                {isFetchingPackages ? '...' : '🔄'}
+                                                            </button>
+                                                        </div>
+                                                    </div>
+
+                                                    <textarea
+                                                        value={goalText}
+                                                        onChange={(e) => setGoalText(e.target.value)}
+                                                        placeholder="e.g. 'Go to Search and find Dominos Pizza'"
+                                                        style={{
+                                                            width: '100%',
+                                                            background: 'rgba(0,0,0,0.2)',
+                                                            border: '1px solid var(--border)',
+                                                            borderRadius: '12px',
+                                                            padding: '12px',
+                                                            color: '#fff',
+                                                            fontSize: '13px',
+                                                            resize: 'none',
+                                                            outline: 'none',
+                                                            minHeight: '100px',
+                                                            fontFamily: 'inherit',
+                                                            marginBottom: '16px'
+                                                        }}
+                                                    />
+
+                                                    <div style={{ display: 'flex', gap: '8px' }}>
+                                                        <button
+                                                            className="btn-primary"
+                                                            style={{ flex: 1, padding: '12px', background: isGoalRunning || !goalAppId ? '#444' : '#10b981', border: 'none', borderRadius: '10px' }}
+                                                            onClick={() => runGoal(goalText)}
+                                                            disabled={isGoalRunning || !goalText || !goalAppId}
+                                                        >
+                                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                                                                {isGoalRunning ? <span className="spin">↻</span> : <span>⚡</span>}
+                                                                <span style={{ fontWeight: 700 }}>{isGoalRunning ? 'RUNNING...' : 'EXECUTE GOAL'}</span>
+                                                            </div>
+                                                        </button>
+
+                                                        {isGoalRunning && (
+                                                            <button
+                                                                style={{ padding: '0 16px', background: '#ef4444', border: 'none', borderRadius: '10px', color: '#fff', cursor: 'pointer', fontWeight: 600 }}
+                                                                onClick={stopGoal}
+                                                            >
+                                                                STOP
+                                                            </button>
                                                         )}
                                                     </div>
+                                                </div>
+
+                                                <div style={{ fontSize: '10px', fontWeight: 800, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '16px' }}>Suggested Actions</div>
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                                    {[
+                                                        { g: "Launch app and skip all onboarding", i: "🚀" },
+                                                        { g: "Add any item to wishlist", i: "❤️" },
+                                                        { g: "Search for 'Pepperoni' and add to cart", i: "🍕" }
+                                                    ].map(item => (
+                                                        <button
+                                                            key={item.g}
+                                                            onClick={() => setGoalText(item.g)}
+                                                            style={{
+                                                                background: 'rgba(255,255,255,0.02)',
+                                                                border: '1px solid var(--border)',
+                                                                borderRadius: '12px',
+                                                                padding: '12px',
+                                                                textAlign: 'left',
+                                                                display: 'flex',
+                                                                alignItems: 'center',
+                                                                gap: '12px',
+                                                                cursor: 'pointer',
+                                                                transition: '0.2s'
+                                                            }}
+                                                            onMouseEnter={(e) => { e.target.style.background = 'rgba(255,255,255,0.05)'; e.target.style.borderColor = 'rgba(255,255,255,0.1)'; }}
+                                                            onMouseLeave={(e) => { e.target.style.background = 'rgba(255,255,255,0.02)'; e.target.style.borderColor = 'var(--border)'; }}
+                                                        >
+                                                            <span style={{ fontSize: '16px' }}>{item.i}</span>
+                                                            <span style={{ fontSize: '11px', color: '#aaa' }}>{item.g}</span>
+                                                        </button>
+                                                    ))}
                                                 </div>
                                             </div>
                                         ) : (
@@ -2749,353 +2948,6 @@ function App() {
                 </div>
             )}
 
-            {/* AI Report Modal */}
-            {showReportModal && currentReport && (
-                <div
-                    style={{
-                        position: 'fixed',
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        background: 'rgba(0, 0, 0, 0.85)',
-                        backdropFilter: 'blur(8px)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        zIndex: 10000,
-                        animation: 'fadeIn 0.2s ease-out'
-                    }}
-                    onClick={() => setShowReportModal(false)}
-                >
-                    <div
-                        style={{
-                            background: 'linear-gradient(135deg, rgba(22, 22, 24, 0.98) 0%, rgba(15, 15, 17, 0.98) 100%)',
-                            border: '1px solid rgba(255, 255, 255, 0.1)',
-                            borderRadius: '24px',
-                            maxWidth: '720px',
-                            width: '90%',
-                            maxHeight: '85vh',
-                            overflow: 'hidden',
-                            boxShadow: '0 40px 80px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05)',
-                            animation: 'slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
-                            display: 'flex',
-                            flexDirection: 'column'
-                        }}
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        {/* Modal Header */}
-                        <div style={{
-                            padding: '28px 32px 24px',
-                            borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
-                            background: 'linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, transparent 100%)'
-                        }}>
-                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                                    <div style={{
-                                        width: '40px',
-                                        height: '40px',
-                                        borderRadius: '12px',
-                                        background: currentReport.summary.status === 'PASS'
-                                            ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)'
-                                            : 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        justifyContent: 'center',
-                                        fontSize: '20px'
-                                    }}>{currentReport.summary.status === 'PASS' ? '✓' : '✗'}</div>
-                                    <div>
-                                        <div style={{ fontSize: '20px', fontWeight: 800, color: '#fff', letterSpacing: '-0.02em' }}>
-                                            Test Report
-                                        </div>
-                                        <div style={{ fontSize: '12px', color: '#888', marginTop: '2px' }}>
-                                            {currentReport.summary.test_name}
-                                        </div>
-                                    </div>
-                                </div>
-                                <button
-                                    onClick={() => setShowReportModal(false)}
-                                    style={{
-                                        width: '32px',
-                                        height: '32px',
-                                        borderRadius: '8px',
-                                        border: '1px solid rgba(255, 255, 255, 0.1)',
-                                        background: 'rgba(255, 255, 255, 0.03)',
-                                        color: '#888',
-                                        cursor: 'pointer',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        justifyContent: 'center',
-                                        fontSize: '18px',
-                                        transition: 'all 0.2s'
-                                    }}
-                                    onMouseEnter={(e) => {
-                                        e.target.style.background = 'rgba(255, 255, 255, 0.08)';
-                                        e.target.style.color = '#fff';
-                                    }}
-                                    onMouseLeave={(e) => {
-                                        e.target.style.background = 'rgba(255, 255, 255, 0.03)';
-                                        e.target.style.color = '#888';
-                                    }}
-                                >×</button>
-                            </div>
-
-                            {/* Summary Stats */}
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
-                                <div style={{
-                                    background: 'rgba(255, 255, 255, 0.03)',
-                                    border: '1px solid rgba(255, 255, 255, 0.08)',
-                                    borderRadius: '12px',
-                                    padding: '14px',
-                                    textAlign: 'center'
-                                }}>
-                                    <div style={{ fontSize: '10px', color: '#888', marginBottom: '6px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Total Steps</div>
-                                    <div style={{ fontSize: '20px', fontWeight: 800, color: '#fff' }}>{currentReport.summary.total_steps}</div>
-                                </div>
-
-                                <div style={{
-                                    background: 'rgba(16, 185, 129, 0.08)',
-                                    border: '1px solid rgba(16, 185, 129, 0.2)',
-                                    borderRadius: '12px',
-                                    padding: '14px',
-                                    textAlign: 'center'
-                                }}>
-                                    <div style={{ fontSize: '10px', color: '#888', marginBottom: '6px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Passed</div>
-                                    <div style={{ fontSize: '20px', fontWeight: 800, color: '#10b981' }}>{currentReport.summary.passed_steps}</div>
-                                </div>
-
-                                <div style={{
-                                    background: currentReport.summary.failed_steps > 0 ? 'rgba(239, 68, 68, 0.08)' : 'rgba(255, 255, 255, 0.03)',
-                                    border: currentReport.summary.failed_steps > 0 ? '1px solid rgba(239, 68, 68, 0.2)' : '1px solid rgba(255, 255, 255, 0.08)',
-                                    borderRadius: '12px',
-                                    padding: '14px',
-                                    textAlign: 'center'
-                                }}>
-                                    <div style={{ fontSize: '10px', color: '#888', marginBottom: '6px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Failed</div>
-                                    <div style={{ fontSize: '20px', fontWeight: 800, color: currentReport.summary.failed_steps > 0 ? '#ef4444' : '#666' }}>
-                                        {currentReport.summary.failed_steps}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Modal Body */}
-                        <div style={{
-                            flex: 1,
-                            overflowY: 'auto',
-                            padding: '24px 32px'
-                        }}>
-                            {/* Failure Details */}
-                            {currentReport.failure_details && currentReport.failure_details.length > 0 && (
-                                <div style={{ marginBottom: '28px' }}>
-                                    <div style={{
-                                        fontSize: '11px',
-                                        fontWeight: 800,
-                                        color: '#ef4444',
-                                        textTransform: 'uppercase',
-                                        letterSpacing: '0.08em',
-                                        marginBottom: '14px',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '8px'
-                                    }}>
-                                        <span style={{ fontSize: '16px' }}>⚠️</span>
-                                        What Failed
-                                    </div>
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                                        {currentReport.failure_details.map((failure, i) => (
-                                            <div key={i} style={{
-                                                background: 'rgba(239, 68, 68, 0.05)',
-                                                border: '1px solid rgba(239, 68, 68, 0.2)',
-                                                borderLeft: '4px solid #ef4444',
-                                                borderRadius: '8px',
-                                                padding: '16px 18px'
-                                            }}>
-                                                <div style={{ fontSize: '13px', fontWeight: 700, color: '#fff', marginBottom: '8px' }}>
-                                                    Step: {failure.failed_step}
-                                                </div>
-                                                <div style={{ fontSize: '12px', color: '#ef4444', marginBottom: '6px' }}>
-                                                    ❌ {failure.reason}
-                                                </div>
-                                                {failure.details && (
-                                                    <div style={{ fontSize: '11px', color: '#999', fontStyle: 'italic', marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(255, 255, 255, 0.05)' }}>
-                                                        {failure.details}
-                                                    </div>
-                                                )}
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* Recommendation */}
-                            {currentReport.recommendation && (
-                                <div style={{ marginBottom: '28px' }}>
-                                    <div style={{
-                                        fontSize: '11px',
-                                        fontWeight: 800,
-                                        color: '#888',
-                                        textTransform: 'uppercase',
-                                        letterSpacing: '0.08em',
-                                        marginBottom: '14px'
-                                    }}>Next Steps</div>
-                                    <div style={{
-                                        background: currentReport.summary.status === 'PASS'
-                                            ? 'rgba(16, 185, 129, 0.05)'
-                                            : 'rgba(59, 130, 246, 0.05)',
-                                        border: currentReport.summary.status === 'PASS'
-                                            ? '1px solid rgba(16, 185, 129, 0.2)'
-                                            : '1px solid rgba(59, 130, 246, 0.2)',
-                                        borderLeft: currentReport.summary.status === 'PASS'
-                                            ? '4px solid #10b981'
-                                            : '4px solid #3b82f6',
-                                        borderRadius: '8px',
-                                        padding: '16px 18px',
-                                        fontSize: '13px',
-                                        color: '#ddd',
-                                        lineHeight: '1.6'
-                                    }}>
-                                        {currentReport.recommendation}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* Execution Steps */}
-                            <div>
-                                <div style={{
-                                    fontSize: '11px',
-                                    fontWeight: 800,
-                                    color: '#888',
-                                    textTransform: 'uppercase',
-                                    letterSpacing: '0.08em',
-                                    marginBottom: '14px'
-                                }}>Step-by-Step Execution</div>
-                                <div style={{
-                                    background: 'rgba(255, 255, 255, 0.02)',
-                                    border: '1px solid rgba(255, 255, 255, 0.08)',
-                                    borderRadius: '12px',
-                                    overflow: 'hidden'
-                                }}>
-                                    {currentReport.execution_steps && currentReport.execution_steps.map((step, i) => (
-                                        <div key={i} style={{
-                                            padding: '12px 16px',
-                                            borderBottom: i === currentReport.execution_steps.length - 1 ? 'none' : '1px solid rgba(255, 255, 255, 0.05)',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '12px',
-                                            background: step.status === 'FAIL' ? 'rgba(239, 68, 68, 0.03)' : 'transparent'
-                                        }}>
-                                            <div style={{
-                                                width: '24px',
-                                                height: '24px',
-                                                borderRadius: '6px',
-                                                background: step.status === 'SUCCESS'
-                                                    ? 'rgba(16, 185, 129, 0.15)'
-                                                    : 'rgba(239, 68, 68, 0.15)',
-                                                color: step.status === 'SUCCESS' ? '#10b981' : '#ef4444',
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                justifyContent: 'center',
-                                                fontSize: '12px',
-                                                fontWeight: 700,
-                                                flexShrink: 0
-                                            }}>
-                                                {step.status === 'SUCCESS' ? '✓' : '✗'}
-                                            </div>
-                                            <div style={{ flex: 1, minWidth: 0 }}>
-                                                <div style={{ fontSize: '12px', color: '#ddd', fontWeight: 500 }}>
-                                                    {step.action}
-                                                </div>
-                                            </div>
-                                            <div style={{ fontSize: '10px', color: '#666', fontFamily: 'JetBrains Mono, monospace' }}>
-                                                {step.time_ms}ms
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Modal Footer */}
-                        <div style={{
-                            padding: '20px 32px',
-                            borderTop: '1px solid rgba(255, 255, 255, 0.08)',
-                            background: 'rgba(0, 0, 0, 0.2)',
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center'
-                        }}>
-                            <div style={{ fontSize: '11px', color: '#666' }}>
-                                Duration: <span style={{ color: '#888', fontWeight: 600 }}>{currentReport.summary.duration_seconds}s</span>
-                                <span style={{ margin: '0 8px', color: '#444' }}>•</span>
-                                Run ID: <span style={{ color: '#888', fontFamily: 'JetBrains Mono, monospace' }}>{currentReport.summary.run_id}</span>
-                            </div>
-                            <div style={{ display: 'flex', gap: '12px' }}>
-                                <button
-                                    onClick={async () => {
-                                        if (confirm('Are you sure you want to delete this test run?')) {
-                                            try {
-                                                await fetch(`${apiBaseUrl}/report/${currentReport.summary.run_id}`, {
-                                                    method: 'DELETE'
-                                                });
-                                                setShowReportModal(false);
-                                                fetchIntelligence(); // Refresh the list
-                                            } catch (err) {
-                                                console.error('Failed to delete run:', err);
-                                            }
-                                        }
-                                    }}
-                                    style={{
-                                        background: 'rgba(239, 68, 68, 0.1)',
-                                        border: '1px solid rgba(239, 68, 68, 0.3)',
-                                        borderRadius: '8px',
-                                        padding: '10px 20px',
-                                        color: '#ef4444',
-                                        fontSize: '13px',
-                                        fontWeight: 600,
-                                        cursor: 'pointer',
-                                        transition: 'all 0.2s'
-                                    }}
-                                    onMouseEnter={(e) => {
-                                        e.target.style.background = 'rgba(239, 68, 68, 0.2)';
-                                        e.target.style.borderColor = 'rgba(239, 68, 68, 0.5)';
-                                    }}
-                                    onMouseLeave={(e) => {
-                                        e.target.style.background = 'rgba(239, 68, 68, 0.1)';
-                                        e.target.style.borderColor = 'rgba(239, 68, 68, 0.3)';
-                                    }}
-                                >Delete</button>
-                                <button
-                                    onClick={() => setShowReportModal(false)}
-                                    style={{
-                                        background: currentReport.summary.status === 'PASS'
-                                            ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)'
-                                            : 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
-                                        border: 'none',
-                                        borderRadius: '8px',
-                                        padding: '10px 24px',
-                                        color: '#fff',
-                                        fontSize: '13px',
-                                        fontWeight: 600,
-                                        cursor: 'pointer',
-                                        transition: 'all 0.2s'
-                                    }}
-                                    onMouseEnter={(e) => {
-                                        e.target.style.transform = 'translateY(-1px)';
-                                        e.target.style.boxShadow = currentReport.summary.status === 'PASS'
-                                            ? '0 8px 16px rgba(16, 185, 129, 0.3)'
-                                            : '0 8px 16px rgba(59, 130, 246, 0.3)';
-                                    }}
-                                    onMouseLeave={(e) => {
-                                        e.target.style.transform = 'translateY(0)';
-                                        e.target.style.boxShadow = 'none';
-                                    }}
-                                >Close</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
         </div>
     );
 }
