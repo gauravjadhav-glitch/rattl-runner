@@ -11,7 +11,7 @@
   --border: rgba(255, 255, 255, 0.1);
   --header-height: 64px;
   --sidebar-width: 240px;
-  --device-pane-width: 420px;
+  --device-pane-width: 800px;
   --radius-lg: 16px;
   --radius-md: 10px;
   --glass: rgba(15, 15, 17, 0.8);
@@ -182,6 +182,7 @@ body {
   from {
     opacity: 0;
   }
+
   to {
     opacity: 1;
   }
@@ -192,6 +193,7 @@ body {
     transform: translateY(30px);
     opacity: 0;
   }
+
   to {
     transform: translateY(0);
     opacity: 1;
@@ -447,7 +449,7 @@ body {
   flex-direction: column;
   padding: 1.5rem;
   align-items: center;
-  overflow-y: auto;
+  overflow: hidden;
   gap: 1.5rem;
   transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
   min-width: 440px;
@@ -459,21 +461,25 @@ body {
 
 .device-frame {
   position: relative;
-  border: 10px solid #1c1c1f;
-  border-radius: 36px;
+  border: 12px solid #1c1c1f;
+  border-radius: 40px;
   background: #000;
-  width: 340px;
-  /* Fixed Mobile Width */
-  height: fit-content;
+  width: auto;
+  height: 85vh;
+  /* Force tall display based on user reference */
+  max-width: 100%;
+  max-height: 95%;
   box-shadow: 0 30px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
   overflow: hidden;
   flex-shrink: 0;
   transition: width 0.3s ease;
+  margin: 20px auto;
 }
 
 .device-screen {
   width: 100%;
-  height: auto;
+  height: 100%;
+  object-fit: contain;
   display: block;
   cursor: crosshair;
 }
@@ -1371,4 +1377,34 @@ body {
 .device-resizer.active::after {
   background: var(--accent);
   width: 2px;
+}
+
+.terminal-ai-bot {
+  color: #60a5fa;
+  /* Light blue */
+  font-style: italic;
+  border-left: 2px solid #60a5fa;
+  padding-left: 8px;
+  margin: 4px 0;
+  background: rgba(96, 165, 250, 0.05);
+}
+
+.terminal-ai-improver {
+  color: #a78bfa;
+  /* Light purple */
+  font-style: italic;
+  border-left: 2px solid #a78bfa;
+  padding-left: 8px;
+  margin: 4px 0;
+  background: rgba(167, 139, 250, 0.05);
+}
+
+.terminal-ai-planner {
+  color: #f59e0b;
+  /* Amber */
+  font-style: italic;
+  border-left: 2px solid #f59e0b;
+  padding-left: 8px;
+  margin: 4px 0;
+  background: rgba(245, 158, 11, 0.05);
 }

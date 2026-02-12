@@ -36,7 +36,7 @@ class ElementMemory(BaseModel):
 class ActionHistory(BaseModel):
     action_id: str
     run_id: str
-    action_type: Literal["tap", "input", "swipe", "assert", "launchApp", "nav", "pressKey", "scroll", "tapOn", "inputText", "waitForAnimationToEnd", "extendedWaitUntil", "assertVisible", "assertNotVisible", "back", "stopApp", "openLink", "eraseText"]
+    action_type: Literal["tap", "input", "swipe", "assert", "launchApp", "nav", "pressKey", "scroll", "tapOn", "inputText", "waitForAnimationToEnd", "extendedWaitUntil", "assertVisible", "assertNotVisible", "back", "stopApp", "openLink", "eraseText", "wait"]
     intent: str
     element_id: Optional[str] = None
     status: Literal["SUCCESS", "FAIL"] = "SUCCESS"
