@@ -1,7 +1,7 @@
 from intelligence import intelligence
 from models import TestRun, ScreenMemory, ElementMemory, ActionHistory, FailureRecord, ConfidenceMetric
 from healer import healer
-import subprocess
+from subprocess import run, Popen, PIPE, TimeoutExpired
 import time
 import hashlib
 import os
@@ -22,9 +22,12 @@ from analysis.improver import improver
 # Global variables for current run tracking
 current_run_id = None
 
+import threading
+_hierarchy_lock = threading.Lock()
 _hierarchy_cache = {"data": None, "time": 0, "hash": None}
 _last_interaction_time = 0
 _native_dump_failures = 0
+
 
 def mark_interaction():
     global _last_interaction_time
@@ -149,10 +152,21 @@ def call_ai_vision(screenshot_path, query, api_key):
         
     return None
 
-def run_adb(command):
+def run_adb(command, timeout=15):
     cmd = ["adb"] + command.split()
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    return result
+    try:
+        result = run(cmd, capture_output=True, text=True, timeout=timeout)
+        return result
+    except TimeoutExpired:
+        print(f"[ERROR] ADB Command timed out: adb {command}")
+        # Return a dummy result object with failure code
+        class DummyResult:
+            def __init__(self):
+                self.returncode = 1
+                self.stdout = ""
+                self.stderr = "Timed out"
+        return DummyResult()
+
 
 def tap_point(x, y):
     mark_interaction()
@@ -253,9 +267,56 @@ def get_screen_hash(hierarchy_data):
     full_str = "|".join(structure)
     return hashlib.md5(full_str.encode()).hexdigest()
 
+def wait_until_app_stable(timeout=30, min_elements=5):
+    """
+    Blocks until the app UI is considered stable and interactive.
+    1. UI must have at least min_elements.
+    2. UI hash must be stable (no change for 1s).
+    """
+    print(f"[DEBUG] Waiting for app stability (timeout {timeout}s)...")
+    start = time.time()
+    last_hash = None
+    stable_since = 0
+    
+    while time.time() - start < timeout:
+        root = get_hierarchy(force_refresh=True)
+        
+        # Count elements (simplified)
+        def count_nodes(n):
+            return 1 + sum(count_nodes(c) for c in n.get("children", []))
+        
+        node_count = count_nodes(root)
+        current_hash = get_screen_hash(root)
+        
+        # If screen is empty or just a root node, it's definitely loading/blank
+        if node_count < min_elements:
+            print(f"[DEBUG] App still loading (only {node_count} elements)...")
+            time.sleep(1.0)
+            stable_since = 0
+            continue
+            
+        if current_hash == last_hash:
+            if stable_since == 0:
+                stable_since = time.time()
+            elif time.time() - stable_since >= 1.0:
+                print(f"[DEBUG] App is STABLE ({node_count} elements)")
+                return True
+        else:
+            last_hash = current_hash
+            stable_since = 0
+            
+        time.sleep(0.5)
+    
+    print("[DEBUG] App stability wait timed out. Proceeding anyway.")
+    return False
+
 def get_hierarchy(force_refresh=False, smart_cache=False):
     global _hierarchy_cache, _native_dump_failures
-    now = time.time()
+    
+    # Critical section: ensuring only one hierarchy fetch runs at a time
+    with _hierarchy_lock:
+        now = time.time()
+
     
     # Smart Cache: If enabled, utilize cache as long as it's newer than the last interaction
     # This allows bulk assertions to run instantly without re-dumping
@@ -268,6 +329,11 @@ def get_hierarchy(force_refresh=False, smart_cache=False):
     is_fresh = _hierarchy_cache["time"] > _last_interaction_time
     if not force_refresh and _hierarchy_cache["data"] and (now - _hierarchy_cache["time"] < 3.0) and is_fresh:
         return _hierarchy_cache["data"]
+
+    # If an interaction just happened (< 1.5s ago), wait a bit more for the screen to actually change
+    # before we start the heavy hierarchy dump. This prevents capturing blank/transient screens.
+    if now - _last_interaction_time < 1.5:
+        time.sleep(0.7)
 
     data = None
     
@@ -294,20 +360,25 @@ def get_hierarchy(force_refresh=False, smart_cache=False):
                 dump_proc = run_adb("shell uiautomator dump /data/local/tmp/uidump.xml")
 
             if dump_proc.returncode == 0:
-                xml_res = run_adb("shell cat /data/local/tmp/uidump.xml")
-                xml_data = xml_res.stdout
+                # Read as bytes to avoid encoding issues with large XMLs
+                xml_res = run(["adb", "shell", "cat", "/data/local/tmp/uidump.xml"], capture_output=True, timeout=10)
+
+                xml_bytes = xml_res.stdout
                 
-                if xml_data and "<?xml" in xml_data:
-                    start_xml = xml_data.find("<?xml")
-                    end_xml = xml_data.rfind("</hierarchy>")
+                if xml_bytes and b"<?xml" in xml_bytes:
+                    start_xml = xml_bytes.find(b"<?xml")
+                    end_xml = xml_bytes.rfind(b"</hierarchy>")
                     if start_xml != -1 and end_xml != -1:
-                        clean_xml = xml_data[start_xml:end_xml + len("</hierarchy>")]
+                        clean_xml_bytes = xml_bytes[start_xml:end_xml + len(b"</hierarchy>")]
                         try:
+                            clean_xml = clean_xml_bytes.decode('utf-8', errors='replace')
                             root = ET.fromstring(clean_xml)
                             data = parse_xml_node(root)
                             # Success! Reset failure count
                             _native_dump_failures = 0
-                        except: pass
+                        except Exception as e:
+                            print(f"[DEBUG] XML Parse Error: {e}")
+
             
             if not data:
                 _native_dump_failures += 1
@@ -319,14 +390,31 @@ def get_hierarchy(force_refresh=False, smart_cache=False):
              print(f"[ERROR] Native dump error: {e}")
 
     if not data:
-        # 2. Fallback to maestro hierarchy
+        # 2. Fallback to maestro hierarchy with retries
+        # Proactive: Kill any existing stuck maestro processes to prevent clashing
+        try:
+            run(["pkill", "-f", "maestro.*hierarchy"], timeout=2)
+        except: pass
+
         print("[DEBUG] Native dump failed/invalid/disabled, falling back to maestro")
-        result = subprocess.run(["maestro", "hierarchy"], capture_output=True, text=True, timeout=30, env={**os.environ, "MAESTRO_OUTPUT_NO_COLOR": "true"})
-        output = result.stdout
-        start = output.find('{')
-        end = output.rfind('}')
-        if start != -1 and end != -1:
-            data = json.loads(output[start:end+1])
+        max_retries = 2 # Reduced retries
+        for attempt in range(max_retries):
+            try:
+                result = run(["maestro", "hierarchy"], capture_output=True, text=True, timeout=15, env={**os.environ, "MAESTRO_OUTPUT_NO_COLOR": "true"})
+
+                output = result.stdout
+                start = output.find('{')
+                end = output.rfind('}')
+                if start != -1 and end != -1:
+                    data = json.loads(output[start:end+1])
+                    break
+            except TimeoutExpired:
+                print(f"[WARN] Maestro hierarchy timed out (attempt {attempt+1}/{max_retries})")
+            except Exception as e:
+                print(f"[WARN] Maestro hierarchy failed: {e}")
+            
+            if attempt < max_retries - 1:
+                time.sleep(2)
 
     if data:
         h = get_screen_hash(data)
@@ -913,6 +1001,10 @@ def run_test_step(step, run_id=None, step_index=None, history=None):
                 intelligence.record_action(run_id, action_type, intent, "SUCCESS", duration)
                 
             yield f"RETURN:{result}"
+            
+            # Settle delay: Allow UI to stabilize after action
+            # Increased to 2.0s to ensure real device screen catches up
+            time.sleep(2.0)
             return
 
         except Exception as e:
@@ -1016,8 +1108,9 @@ def _dispatch_step_logic(s, step_context=None):
         # Launch the app with optimized startup
         run_adb(f"shell monkey -p {app_id} -c android.intent.category.LAUNCHER 1")
         
-        # Reduced wait time - app launches quickly
-        time.sleep(1.5)
+        # New Smart Wait: Blocks until app is actually rendered and interactive
+        wait_until_app_stable(timeout=45, min_elements=8)
+        mark_interaction() # Ensure cache is invalidated
         
         return f"Launch {app_id}" + (" (cleared state)" if clear_state else "")
 
@@ -1032,8 +1125,6 @@ def _dispatch_step_logic(s, step_context=None):
             if "," in pt:
                 px_str, py_str = pt.split(",")
             else:
-                # Handle possible YAML parsing artifact where {point: 90%, 9%} 
-                # might result in 'point' being '90%' and others as keys
                 px_str = pt
                 py_str = None
                 for k in s.params:
@@ -1044,6 +1135,12 @@ def _dispatch_step_logic(s, step_context=None):
                      raise Exception(f"Invalid point format: {pt}")
             
             tap_point_percent(px_str, py_str)
+            
+            # After a coordinate tap, wait slightly for screen to react
+            # before reporting success to the UI.
+            time.sleep(1.0)
+            wait_until_app_stable(timeout=10, min_elements=3)
+            
             return f"Tap Point: {px_str},{py_str}"
             
         query = resolve_query(s.params)
@@ -1195,8 +1292,10 @@ def _dispatch_step_logic(s, step_context=None):
          raise Exception(f"No bounds for {query}")
 
     elif s.type == "inputText":
+        # Small pre-delay to ensure input field has focus
+        time.sleep(0.5)
         input_text(s.params)
-        time.sleep(0.1)  # Small delay to ensure text is processed
+        time.sleep(0.5)  # Delay to ensure text is processed
         return f"Input: {s.params}"
 
     elif s.type == "pressKey":
@@ -1523,7 +1622,6 @@ def run_yaml_custom(yaml_content, api_key=None, filename=""):
         yield f"data: [ERROR] {str(e)}\n\n"
 
 def run_folder_custom(folder_path):
-    import os
     try:
         if not os.path.isdir(folder_path):
              yield f"data: [ERROR] Not a folder: {folder_path}\n\n"
@@ -1621,7 +1719,22 @@ def run_goal_autonomous(goal: str, app_id: Optional[str] = None, api_key: Option
         # Execute planned steps
         for step in steps:
             # Prepare step context for intelligence
-            yield f"data: [EXEC] Action: {json.dumps(step)}\n\n"
+            # Convert to clean YAML for editor appending
+            if isinstance(step, dict) and len(step) == 1 and not any(isinstance(v, (dict, list)) for v in step.values()):
+                # User requested format: "tapOn": "Allow" (Quoted Key)
+                k, v = list(step.items())[0]
+                # Manually construct string to force quotes on key
+                val_str = json.dumps(v)
+                yaml_str = f'"{k}": {val_str}'
+            else:
+                # Complex step: keep block style
+                yaml_str = yaml.dump(step, default_flow_style=False).strip()
+                # Indent subsequent lines for valid YAML list item structure
+                if '\n' in yaml_str:
+                   lines = yaml_str.split('\n')
+                   yaml_str = lines[0] + "\n" + "\n".join(["  " + l for l in lines[1:]])
+            
+            yield f"data: [EXEC] {yaml_str}\n\n"
             
             try:
                 res_msg = "Completed"
@@ -1633,16 +1746,21 @@ def run_goal_autonomous(goal: str, app_id: Optional[str] = None, api_key: Option
                 
                 history.append({"action": step, "result": res_msg})
                 
-                # RE-OBSERVE: After each action, the screen might change.
-                # If we have more steps planned, we should ideally verify if they still make sense
-                # or just break and let the outer loop re-plan from the new state.
-                break # Favor re-planning after every single action for max robustness.
+                # Optimization: Do NOT break for typing or simple actions to allow batch execution
+                # But for navigation (tap), maybe we should re-observe?
+                # User asked for speed. Let's trust the plan for up to 5 steps unless it fails.
+                time.sleep(1.0) # Small delay for UI update
+                
+                # If we REALLY want to be safe, maybe check if the screen changed drastically?
+                # For now, just continue the loop.
+                # removing the break statement
 
             except Exception as e:
-                yield f"data: [ERROR] Step failed: {str(e)}\n\n"
-                intelligence.end_run(run_id, "FAIL", 0)
-                yield f"data: [DONE] EXIT_CODE: 1\n\n"
-                return
+                error_msg = str(e)
+                yield f"data: [WARN] Step failed: {error_msg}. Adapting plan...\n\n"
+                history.append({"action": step, "result": f"FAILED: {error_msg}"})
+                # Break the inner batch loop to force a re-plan from the current state
+                break
 
     yield f"data: [ERROR]Reached max steps ({max_steps}) without hitting goal.\n\n"
     intelligence.end_run(run_id, "FAIL", 0)

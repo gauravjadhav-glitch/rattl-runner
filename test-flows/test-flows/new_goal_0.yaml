@@ -1,5 +1,0 @@
-appId: com.Dominos
----
-- launchApp:
-    clearState: true
-- Action: {"tapOn": "Menu"}

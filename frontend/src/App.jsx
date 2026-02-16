@@ -168,6 +168,10 @@ function App() {
     const [isGoalRunning, setIsGoalRunning] = useState(false);
     const [showPackageDropdown, setShowPackageDropdown] = useState(false);
     const [isFetchingPackages, setIsFetchingPackages] = useState(false);
+    const [isApplyingFixes, setIsApplyingFixes] = useState(false);
+    const [hierarchyError, setHierarchyError] = useState(null);
+
+
 
 
     // Custom Modal States
@@ -198,6 +202,10 @@ function App() {
     // For Line Numbers
     const countLines = (text) => text.split('\n').length;
     const [lineCount, setLineCount] = useState(1);
+    const currentAppId = useMemo(() => {
+        const match = editorContent.match(/appId:\s*["']?([a-zA-Z0-9._]+)["']?/);
+        return match ? match[1] : null;
+    }, [editorContent]);
 
     // --- Sorting Helper ---
     const getSortedFiles = (rawFiles) => {
@@ -314,9 +322,13 @@ function App() {
     // Sequential polling handler: Only fetch next frame after current one is loaded
     const onScreenLoad = () => {
         if (deviceConnected) {
-            setRefreshKey(prev => prev + 1);
+            // Small throttle to prevent flooding the backend/device with too many requests
+            setTimeout(() => {
+                setRefreshKey(prev => prev + 1);
+            }, 50);
         }
     };
+
 
     // Only fetch hierarchy if inspector is ON and device is connected
     useEffect(() => {
@@ -411,11 +423,17 @@ function App() {
         }
     };
 
-    const fetchHierarchy = async () => {
+    const fetchHierarchy = async (force = false) => {
         if (!showInspector || isFetchingHierarchy) return;
         setIsFetchingHierarchy(true);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
+
         try {
-            const res = await fetch(`${apiBaseUrl}/hierarchy`);
+            const url = force ? `${apiBaseUrl}/hierarchy?force=true` : `${apiBaseUrl}/hierarchy`;
+            const res = await fetch(url, { signal: controller.signal });
+            clearTimeout(timeoutId);
+
             const data = await res.json();
             if (data.output) {
                 const parsed = JSON.parse(data.output);
@@ -423,7 +441,17 @@ function App() {
                 const flattened = [];
                 flattenHierarchy(parsed, flattened);
                 setElements(flattened);
+
+                if (data.error) {
+                    setHierarchyError(data.error);
+                } else {
+                    setHierarchyError(null);
+                }
+            } else if (data.error) {
+                setHierarchyError(data.error);
+                setElements([]);
             }
+
         } catch (e) {
             console.error('Fetch hierarchy error:', e);
         } finally {
@@ -433,13 +461,17 @@ function App() {
 
     const flattenHierarchy = (node, acc) => {
         if (!node) return;
-        if (node.bounds) {
+
+        const hasInfo = node.text || node.resourceId || node.contentDescription || node['resource-id'] || node['content-desc'] || node.attributes;
+        if (node.bounds || hasInfo) {
             acc.push(node);
         }
+
         if (node.children) {
             node.children.forEach(child => flattenHierarchy(child, acc));
         }
     };
+
 
     const checkDevice = async () => {
         try {
@@ -664,7 +696,7 @@ function App() {
         const accLocs = [];
 
         // 1. Text Content
-        const textValue = (element.text || element.attributes?.text || '').trim();
+        const textValue = (element.text || element.attributes?.text || element.hint || element.attributes?.hint || '').trim();
         if (textValue) {
             textLocs.push({
                 type: 'Text',
@@ -682,7 +714,7 @@ function App() {
         // Strategy A: Explicit Children Hierarchy (DFS)
         if (element.children && element.children.length > 0) {
             const findTextInChildren = (node) => {
-                const t = (node.text || node.attributes?.text || '').trim();
+                const t = (node.text || node.attributes?.text || node.attributes?.hint || '').trim();
                 if (t) return t;
                 if (node.children) {
                     for (const child of node.children) {
@@ -697,11 +729,15 @@ function App() {
         // Strategy B: Spatial Children (Flat List Fallback)
         else if (elements && elements.length > 0 && element.bounds) {
             const { left: pl, top: pt, right: pr, bottom: pb } = element.bounds;
-            // Find elements strictly contained within parent
+
+            // Find elements "mostly" contained within parent (Center point check is more robust than strict bounds)
             const contained = elements.filter(el => {
                 if (el === element || !el.bounds) return false;
                 const { left: cl, top: ct, right: cr, bottom: cb } = el.bounds;
-                return cl >= pl && cr <= pr && ct >= pt && cb <= pb;
+                const cx = (cl + cr) / 2;
+                const cy = (ct + cb) / 2;
+                // Check if center of child is inside parent
+                return cx >= pl && cx <= pr && cy >= pt && cy <= pb;
             });
 
             // Sort by area (smallest first - deeper in hierarchy) to get most specific text
@@ -711,13 +747,13 @@ function App() {
                 return areaA - areaB;
             });
 
-            const textNode = contained.find(el => (el.text || el.attributes?.text || '').trim());
+            const textNode = contained.find(el => (el.text || el.attributes?.text || el.attributes?.hint || '').trim());
             if (textNode) {
-                childText = (textNode.text || textNode.attributes?.text || '').trim();
+                childText = (textNode.text || textNode.attributes?.text || textNode.attributes?.hint || '').trim();
             }
         }
 
-        if (childText) {
+        if (childText && childText !== textValue) {
             textLocs.push({
                 type: 'Text',
                 label: 'Child Text',
@@ -742,7 +778,7 @@ function App() {
         }
 
         // 3. Accessibility / Content Description
-        const descValue = element.contentDescription || element['content-desc'] || element.attributes?.['content-desc'] || element.hint;
+        const descValue = element.contentDescription || element['content-desc'] || element.attributes?.['content-desc'] || element.hint || element.attributes?.hint;
         if (descValue) {
             accLocs.push({
                 type: 'Accessibility',
@@ -1183,7 +1219,9 @@ function App() {
                         // Append step to editor content dynamically
                         // Append step to editor content dynamically AND save to file
                         setEditorContent(prev => {
-                            const newContent = prev.endsWith('\n') ? `${prev}- ${execStep}\n` : `${prev}\n- ${execStep}\n`;
+                            // Check if backend already sent a dashed list item
+                            const prefix = execStep.trim().startsWith('-') ? '' : '- ';
+                            const newContent = prev.endsWith('\n') ? `${prev}${prefix}${execStep}\n` : `${prev}\n${prefix}${execStep}\n`;
 
                             // Auto-save logic
                             const saveContent = newContent;
@@ -1459,6 +1497,29 @@ function App() {
     };
 
     // --- Interaction ---
+    const isElementVisibleOnPage = (el) => {
+        if (!el) return false;
+
+        // Restore: Only show elements with visible text
+        const hasText = (el.text || el.contentDescription || el['content-desc'] || el.attributes?.text || el.attributes?.hint);
+        if (!hasText) return false;
+
+        // Visibility check
+        if (el.attributes?.['visible-to-user'] === 'false') return false;
+
+        // Bounds check
+        const b = el.bounds;
+        if (b && deviceInfo.width > 0 && deviceInfo.height > 0) {
+            if (b.bottom <= 0 || b.top >= deviceInfo.height) return false;
+            if (b.right <= 0 || b.left >= deviceInfo.width) return false;
+        }
+
+        return true;
+    };
+
+
+
+
     const handleScreenClick = async (e) => {
         if (!currentFile) {
             addLog('info', 'Please select or create a test file first');
@@ -1473,26 +1534,62 @@ function App() {
         const x = (xPct / 100) * deviceInfo.width;
         const y = (yPct / 100) * deviceInfo.height;
 
+        // Find all overlapping candidates first
         let bestMatch = null;
-        let minArea = Infinity;
-
+        const candidates = [];
         elements.forEach(el => {
             if (!el.bounds) return;
+
+            // Skip hidden elements
+            if (el.attributes?.['visible-to-user'] === 'false') return;
+
+            // Optional: Filter by package if currentAppId is set in the script
+            const pkg = el.package || el.attributes?.package;
+            if (currentAppId && pkg && pkg !== currentAppId && pkg !== 'android') return;
+
             const { left, top, right, bottom } = el.bounds;
             if (x >= left && x <= right && y >= top && y <= bottom) {
                 const area = (right - left) * (bottom - top);
-                const hasText = !!(el.text || el.attributes?.text || el.contentDescription || el['content-desc']);
-
-                // Element prioritization: Smallest element, but prefer those with text/ID
-                // Weight elements with text significantly lower to prefer them
-                const score = hasText ? area * 0.5 : area;
-
-                if (score < minArea) {
-                    minArea = score;
-                    bestMatch = el;
-                }
+                candidates.push({ el, area });
             }
         });
+
+        // Sort by area (smallest first - most specific)
+        candidates.sort((a, b) => a.area - b.area);
+
+        if (candidates.length > 0) {
+            // AGGRESSIVE BUBBLE UP STRATEGY:
+            // We want 'tapOn: "Text"' if possible.
+            // Iterate through candidates (from smallest to largest) and pick the FIRST one
+            // that gives us a valid TEXT or ACCESSIBILITY locator.
+
+            let foundTextMatch = null;
+            let foundIdMatch = null;
+
+            for (const cand of candidates) {
+                const locs = getAvailableLocators(cand.el);
+                const hasText = locs.some(l => l.type === 'Text' || l.type === 'Accessibility');
+                const hasId = locs.some(l => l.type === 'ID');
+
+                if (hasText) {
+                    foundTextMatch = cand.el;
+                    break; // Stop at first (smallest) element with text
+                }
+
+                if (hasId && !foundIdMatch) {
+                    foundIdMatch = cand.el; // Keep smallest element with ID as backup
+                }
+            }
+
+            // Priority: Text > ID > Smallest Element (Point)
+            if (foundTextMatch) {
+                bestMatch = foundTextMatch;
+            } else if (foundIdMatch) {
+                bestMatch = foundIdMatch;
+            } else {
+                bestMatch = candidates[0].el;
+            }
+        }
 
         if (interactMode) {
             // "AUTO-INSERT & RUN" Mode (Interactive Studio style)
@@ -1520,9 +1617,8 @@ function App() {
                 label = `Tap at ${Math.round(xPct)}%, ${Math.round(yPct)}%`;
             }
 
-            const stepCount = (editorContent.match(/^\s*-\s+/gm) || []).length + 1;
             const yaml = formatYaml('tapOn', actionParams);
-            const cmd = `# ${stepCount}. ${label}\n${yaml}`;
+            const cmd = yaml;
 
             setEditorContent(prev => prev + (prev.endsWith('\n') ? '' : '\n') + cmd + '\n');
             addLog('info', `Inserting & Running: ${label}`);
@@ -1552,16 +1648,38 @@ function App() {
             return;
         }
 
-        // When Inspector is OFF: Still show element selection and Inspector panel
-        // (Users can choose which action to perform, not just auto-insert Tap On)
+        // When Inspector is OFF: Implicitly Tap (Remote Control Logic)
         if (bestMatch) {
+            // Bubble up logic removed - handled by top level strategy
             const { left: l, top: t, right: r, bottom: b } = bestMatch.bounds;
-            setPopupPosition({
-                x: ((l + r) / 2 / deviceInfo.width) * 100,
-                y: ((t + b) / 2 / deviceInfo.height) * 100
-            });
+            const cx = ((l + r) / 2 / deviceInfo.width) * 100;
+            const cy = ((t + b) / 2 / deviceInfo.height) * 100;
+
+            setPopupPosition({ x: cx, y: cy });
             setSelectedElement(bestMatch);
             setSelectedLocatorIndex(0);
+
+            // Execute Tap (SMART TAP)
+            // Use the best locator found to ensure robustness (even in remote control)
+            const locators = getAvailableLocators(bestMatch);
+
+            // DEBUG LOGGING
+            const locTypes = locators.map(l => l.type).join(', ');
+            console.log(`[DEBUG] Clicked. BestMatch: ${bestMatch.className || 'Unknown'}, Text: ${bestMatch.text || ''}, Locators: ${locTypes}`);
+            // addLog('info', `DEBUG: Found ${bestMatch.className} with locators: ${locTypes}`);
+
+            let tapParams = { point: `${Math.round(cx)}%,${Math.round(cy)}%` };
+
+            // Try to find a high-reliability text or id locator (prefer Text for readability)
+            const smartLoc = locators.find(l => l.type === 'Text') ||
+                locators.find(l => l.type === 'ID') ||
+                locators.find(l => l.type === 'Accessibility');
+
+            if (smartLoc) {
+                tapParams = smartLoc.selector;
+            }
+
+            runStep({ tapOn: tapParams });
         } else {
             setSelectedElement({
                 text: `Point (${Math.round(xPct)}%, ${Math.round(yPct)}%)`,
@@ -1569,8 +1687,42 @@ function App() {
                 bounds: { left: x, top: y, right: x, bottom: y }
             });
             setPopupPosition({ x: xPct, y: yPct });
+
+            // Execute Tap immediately
+            runStep({ tapOn: { point: `${Math.round(xPct)}%,${Math.round(yPct)}%` } });
+        }
+
+    };
+
+    const applyIntelligenceFixes = async () => {
+        setIsApplyingFixes(true);
+        try {
+            addLog('info', 'Applying AI-powered locator fixes...');
+            const res = await fetch(`${apiBaseUrl}/api/intelligence/apply`, {
+                method: 'POST',
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                if (data.applied_fixes && data.applied_fixes.length > 0) {
+                    data.applied_fixes.forEach(fix => addLog('success', fix));
+                    addLog('success', `Applying fixes complete! Updated ${data.applied_fixes.length} locations across your test flows.`);
+                    // Refresh current file if it was updated
+                    if (currentFile) {
+                        fetchFile(currentFile.path);
+                    }
+                } else {
+                    addLog('info', 'No fixes were needed. Your locators are already optimized based on history.');
+                }
+            } else {
+                addLog('error', `Failed to apply fixes: ${data.detail || 'Unknown error'}`);
+            }
+        } catch (e) {
+            addLog('error', `Error applying fixes: ${e.message}`);
+        } finally {
+            setIsApplyingFixes(false);
         }
     };
+
 
     const handleAIGenerate = async (e, customInstruction = null) => {
         if (e) e.stopPropagation();
@@ -1590,10 +1742,21 @@ function App() {
                 // 2. Hierarchy
                 const hierarchyStr = JSON.stringify(hierarchy || {});
 
-                // 3. Context
-                const elementCtx = (selectedElement && selectedElement.isPoint)
-                    ? `User clicked point at ${Math.round(popupPosition?.x || 0)}%, ${Math.round(popupPosition?.y || 0)}%`
-                    : `User selected element: ${JSON.stringify(selectedElement)}`;
+                // 3. Smart Context Construction
+                let elementCtx = "";
+                if (selectedElement && selectedElement.isPoint) {
+                    elementCtx = `User clicked point at ${Math.round(popupPosition?.x || 0)}%, ${Math.round(popupPosition?.y || 0)}%`;
+                } else if (selectedElement) {
+                    // Extract ONLY safe, relevant fields to avoid circular JSON (from parent refs)
+                    const safeEl = {
+                        text: selectedElement.text || selectedElement.attributes?.text || selectedElement.attributes?.hint,
+                        resourceId: selectedElement.resourceId || selectedElement['resource-id'],
+                        contentDescription: selectedElement.contentDescription || selectedElement['content-desc'],
+                        className: selectedElement.className || selectedElement.class,
+                        bounds: selectedElement.bounds
+                    };
+                    elementCtx = `User selected element: ${JSON.stringify(safeEl)}`;
+                }
 
                 const fullContext = `${elementCtx}\nAvailable Packages: ${packages.join(', ')}`;
 
@@ -1611,11 +1774,9 @@ function App() {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
-
                 const data = await res.json();
                 if (data.success) {
-                    const stepCount = (editorContent.match(/^\s*-\s+/gm) || []).length + 1;
-                    const cmd = `# ${stepCount}. ${customInstruction ? 'Bulk Assertions' : 'AI Step'}\n${data.yaml}`;
+                    const cmd = data.yaml;
                     setEditorContent(prev => prev + (prev.endsWith('\n') ? '' : '\n') + cmd + '\n');
                     addLog('success', 'AI Generated Code successfully!');
                 } else {
@@ -2132,14 +2293,32 @@ function App() {
                                     aspectRatio: `${deviceInfo.width} / ${deviceInfo.height}`,
                                     flexShrink: 0
                                 }}>
-                                    <img
-                                        src={`${apiBaseUrl}/screenshot?t=${refreshKey}`}
-                                        className="device-screen"
-                                        alt="Device Screen"
-                                        onClick={handleScreenClick}
-                                        onLoad={onScreenLoad}
-                                        onError={() => setTimeout(onScreenLoad, 1000)} // Retry on error
-                                    />
+                                    {deviceConnected ? (
+                                        <img
+                                            src={`${apiBaseUrl}/screenshot?t=${refreshKey}`}
+                                            className="device-screen"
+                                            alt="Device Screen"
+                                            onClick={handleScreenClick}
+                                            onLoad={onScreenLoad}
+                                            onError={() => setTimeout(onScreenLoad, 1000)} // Retry on error
+                                        />
+                                    ) : (
+                                        <div style={{
+                                            width: '100%',
+                                            height: '100%',
+                                            display: 'flex',
+                                            flexDirection: 'column',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            color: '#666',
+                                            background: '#0a0a0c',
+                                            gap: '12px'
+                                        }}>
+                                            <div className="spin" style={{ fontSize: '24px' }}>📡</div>
+                                            <div style={{ fontSize: '11px', fontWeight: 600 }}>WAITING FOR DEVICE...</div>
+                                        </div>
+                                    )}
+
 
                                     {showInspector && deviceConnected && (
                                         <div className="inspector-layer">
@@ -2206,7 +2385,7 @@ function App() {
                                     animation: 'sidebarIn 0.3s cubic-bezier(0.16, 1, 0.3, 1)'
                                 }}>
                                     {/* Tab Header */}
-                                    <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', background: 'rgba(0,0,0,0.2)' }}>
+                                    <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', background: 'rgba(0,0,0,0.2)', alignItems: 'center' }}>
                                         <button
                                             onClick={() => setActiveTab('inspector')}
                                             style={{
@@ -2216,7 +2395,7 @@ function App() {
                                                 background: 'transparent', border: 'none', cursor: 'pointer', transition: '0.2s'
                                             }}
                                         >
-                                            🔍 INSPECTOR
+                                            🔍 SCRIPT WRITER
                                         </button>
                                         <button
                                             onClick={() => setActiveTab('goal')}
@@ -2228,6 +2407,13 @@ function App() {
                                             }}
                                         >
                                             🎯 GOAL MODE
+                                        </button>
+                                        <button
+                                            onClick={() => setShowInspector(false)}
+                                            style={{ padding: '0 12px', background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: '18px' }}
+                                            title="Close Panel"
+                                        >
+                                            ×
                                         </button>
                                     </div>
 
@@ -2422,7 +2608,7 @@ function App() {
                                                             <button
                                                                 onClick={(e) => {
                                                                     e.stopPropagation();
-                                                                    fetchHierarchy();
+                                                                    fetchHierarchy(true);
                                                                     setRefreshKey(Date.now());
                                                                 }}
                                                                 className={isFetchingHierarchy ? 'spin' : ''}
@@ -2464,10 +2650,10 @@ function App() {
                                                                 {
                                                                     title: '🖐️ Swipe & Gestures',
                                                                     actions: [
-                                                                        { label: 'Swipe Up', yaml: formatYaml('swipe', { direction: 'UP' }), cmd: 'swipe' },
-                                                                        { label: 'Swipe Down', yaml: formatYaml('swipe', { direction: 'DOWN' }), cmd: 'swipe' },
-                                                                        { label: 'Swipe Right', yaml: formatYaml('swipe', { direction: 'RIGHT' }), cmd: 'swipe' },
-                                                                        { label: 'Swipe Left', yaml: formatYaml('swipe', { direction: 'LEFT' }), cmd: 'swipe' }
+                                                                        { label: 'Swipe Up', yaml: `- swipe:\n    direction: UP`, cmd: 'swipe' },
+                                                                        { label: 'Swipe Down', yaml: `- swipe:\n    direction: DOWN`, cmd: 'swipe' },
+                                                                        { label: 'Swipe Right', yaml: `- swipe:\n    direction: RIGHT`, cmd: 'swipe' },
+                                                                        { label: 'Swipe Left', yaml: `- swipe:\n    direction: LEFT`, cmd: 'swipe' }
                                                                     ]
                                                                 },
                                                                 {
@@ -2550,7 +2736,7 @@ function App() {
                                                                                                 style={{ flex: 1 }}
                                                                                                 onClick={(e) => {
                                                                                                     e.stopPropagation();
-                                                                                                    const cmd = `# ${stepCount}. ${action.label}\n${action.yaml}`;
+                                                                                                    const cmd = action.yaml;
                                                                                                     setEditorContent(prev => prev + (prev.endsWith('\n') ? '' : '\n') + cmd + '\n');
                                                                                                     addLog('success', `Added to YAML: ${action.label}`);
                                                                                                 }}
@@ -2603,10 +2789,126 @@ function App() {
                                                     </div>
                                                 </>
                                             ) : (
-                                                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', opacity: 0.3, textAlign: 'center', padding: '40px' }}>
-                                                    <div style={{ fontSize: '32px', marginBottom: '16px' }}>🖱️</div>
-                                                    <div style={{ fontSize: '12px', fontWeight: 600 }}>Inspector Active</div>
-                                                    <div style={{ fontSize: '10px' }}>Tap any element on the screen to view actions</div>
+                                                <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+                                                    <div style={{ padding: '16px', borderBottom: '1px solid var(--border)', background: 'rgba(0,0,0,0.1)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                        <div>
+                                                            <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', color: '#10b981', marginBottom: '4px', letterSpacing: '0.05em' }}>
+                                                                Interactive Elements ⚡️
+                                                            </div>
+                                                            <div style={{ fontSize: '10px', color: '#888' }}>
+                                                                Click any text to add to script
+                                                            </div>
+                                                        </div>
+                                                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                                            {isFetchingHierarchy && elements.length > 0 && (
+                                                                <div className="spin" style={{ fontSize: '12px', opacity: 0.6 }}>↻</div>
+                                                            )}
+                                                            <button
+                                                                onClick={(e) => { e.stopPropagation(); fetchHierarchy(true); setRefreshKey(Date.now()); }}
+                                                                style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: '6px', width: '28px', height: '28px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#fff' }}
+                                                                title="Refresh Elements"
+                                                            >
+                                                                ↻
+                                                            </button>
+                                                        </div>
+
+
+
+                                                    </div>
+                                                    <div style={{ flex: 1, overflowY: 'auto', padding: '12px' }} className="custom-scrollbar">
+                                                        {(isFetchingHierarchy && elements.filter(isElementVisibleOnPage).length === 0) ? (
+                                                            <div style={{ textAlign: 'center', padding: '40px 20px', opacity: 0.5 }}>
+                                                                <div className="spin" style={{ fontSize: '24px', marginBottom: '8px', display: 'inline-block' }}>↻</div>
+                                                                <div style={{ fontSize: '11px' }}>Scanning UI elements...</div>
+                                                            </div>
+                                                        ) : elements.filter(isElementVisibleOnPage).length > 0 ? (
+
+                                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+
+                                                                {elements
+                                                                    .filter(isElementVisibleOnPage)
+                                                                    .map((el, idx) => {
+                                                                        const displayText = (el.text || el.contentDescription || el['content-desc'] || el.attributes?.text || el.attributes?.hint || '').trim();
+                                                                        const fullId = el.resourceId || el['resource-id'] || el.attributes?.['resource-id'] || '';
+                                                                        const shortId = fullId ? fullId.split('/').pop() : '';
+
+                                                                        return (
+
+
+
+                                                                            <button
+                                                                                key={idx}
+                                                                                onClick={(e) => {
+                                                                                    e.stopPropagation();
+                                                                                    // Select this element
+                                                                                    if (el.bounds) {
+                                                                                        const { left: l, top: t, right: r, bottom: b } = el.bounds;
+                                                                                        const centerX = ((l + r) / 2 / deviceInfo.width) * 100;
+                                                                                        const centerY = ((t + b) / 2 / deviceInfo.height) * 100;
+                                                                                        setPopupPosition({ x: centerX, y: centerY });
+                                                                                    } else {
+                                                                                        setPopupPosition({ x: 50, y: 50 });
+                                                                                    }
+                                                                                    setSelectedElement(el);
+                                                                                }}
+                                                                                style={{
+                                                                                    background: 'rgba(255,255,255,0.03)',
+                                                                                    border: '1px solid var(--border)',
+                                                                                    borderRadius: '8px',
+                                                                                    padding: '10px 12px',
+                                                                                    textAlign: 'left',
+                                                                                    cursor: 'pointer',
+                                                                                    transition: 'all 0.2s',
+                                                                                    display: 'flex',
+                                                                                    alignItems: 'center',
+                                                                                    gap: '10px',
+                                                                                    width: '100%'
+                                                                                }}
+                                                                                onMouseEnter={(e) => {
+                                                                                    e.currentTarget.style.background = 'rgba(255,255,255,0.08)';
+                                                                                    e.currentTarget.style.borderColor = 'var(--text-secondary)';
+                                                                                }}
+                                                                                onMouseLeave={(e) => {
+                                                                                    e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
+                                                                                    e.currentTarget.style.borderColor = 'var(--border)';
+                                                                                }}
+                                                                            >
+                                                                                <div style={{
+                                                                                    width: '6px', height: '6px', borderRadius: '50%',
+                                                                                    background: el.text || el.attributes?.text ? '#10b981' : '#f59e0b',
+                                                                                    flexShrink: 0
+                                                                                }}></div>
+                                                                                <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', flex: 1 }}>
+                                                                                    <span style={{ fontSize: '11px', color: 'var(--text-primary)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                                                        {displayText}
+                                                                                    </span>
+                                                                                    {shortId && (
+                                                                                        <span style={{ fontSize: '9px', color: '#666', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                                                            {shortId}
+                                                                                        </span>
+                                                                                    )}
+                                                                                </div>
+                                                                            </button>
+                                                                        );
+                                                                    })}
+                                                            </div>
+                                                        ) : (
+                                                            <div style={{ textAlign: 'center', padding: '40px 20px', opacity: 0.5 }}>
+                                                                <div style={{ fontSize: '24px', marginBottom: '8px' }}>🌑</div>
+                                                                <div style={{ fontSize: '11px' }}>{hierarchyError || "No interactive elements found on this screen."}</div>
+                                                                {hierarchyError && (
+                                                                    <button
+                                                                        onClick={() => fetchHierarchy(true)}
+                                                                        style={{ marginTop: '12px', background: 'var(--accent)', border: 'none', borderRadius: '4px', padding: '4px 12px', color: '#fff', fontSize: '10px', cursor: 'pointer' }}
+                                                                    >
+                                                                        RETRY
+                                                                    </button>
+                                                                )}
+                                                            </div>
+
+
+                                                        )}
+                                                    </div>
                                                 </div>
                                             )
                                         )}
@@ -2919,8 +3221,7 @@ function App() {
                                                 fetchFiles();
                                                 setShowNewFolderModal(false);
                                                 setNewFolderName('');
-                                            })
-                                            .catch(err => addLog('error', `Failed to create folder: ${err.message}`));
+                                            }).catch(err => addLog('error', `Failed to create folder: ${err.message}`));
                                     }
                                 }
                                 if (e.key === 'Escape') setShowNewFolderModal(false);

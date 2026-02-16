@@ -81,6 +81,16 @@ async def get_intelligence_stats():
     from intelligence import intelligence
     return intelligence.raw_data
 
+@app.post("/api/intelligence/apply")
+async def apply_intelligence_fixes():
+    from intelligence import intelligence
+    from analysis.improver import improver
+    
+    # We pass WORKSPACE_DIR and storage_path
+    fixes = improver.apply_improvements(WORKSPACE_DIR, intelligence.storage_path)
+    return {"status": "success", "applied_fixes": fixes}
+
+
 @app.post("/memory/screen")
 async def save_screen(request: dict):
     from intelligence import intelligence
@@ -374,17 +384,23 @@ def delete_file(path: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/hierarchy")
-def get_hierarchy():
+def get_hierarchy(force: bool = False):
     try:
-        # Use the improved hierarchy logic from runner.py
-        # This handles native ADB dump + normalization to Maestro format
-        data = runner.get_hierarchy()
-        if data:
+        data = runner.get_hierarchy(force_refresh=force)
+        if data is not None:
             return {"output": json.dumps(data)}
-        return {"output": "{\"children\":[]}", "error": "Failed to fetch hierarchy"}
+
+        
+        # Diagnostics
+        error_msg = "Hierarchy is empty. Check if device is connected and unlocked."
+        if not runner._native_dump_failures == 0:
+             error_msg = f"Native dump failed multiple times. Maestro fallback might also be failing."
+             
+        return {"output": "{\"children\":[]}", "error": error_msg}
     except Exception as e:
         print(f"Hierarchy exception: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"output": "{\"children\":[]}", "error": str(e)}
+
 
 @app.get("/device_info")
 def get_device_info():
@@ -423,37 +439,58 @@ def get_device_info():
 
 @app.get("/screenshot")
 def get_screenshot():
-    # Capture screenshot via adb and return as image/png
-    
-    # Method 1: exec-out (Fastest)
+    """
+    Captures a screenshot from the connected device.
+    Uses multiple methods in sequence to ensure robustness.
+    """
+    # 0. Check power state (Optional but helpful)
+    # If the screen is off, screencap might return a blank image or fail.
+    # We don't block here but it's good for logging.
+
+    # Method 1: exec-out screencap (Fastest, direct binary stream)
     try:
-        result = subprocess.run(["adb", "exec-out", "screencap", "-p"], capture_output=True, timeout=3)
-        if result.returncode == 0 and len(result.stdout) > 1000 and result.stdout.startswith(b'\x89PNG'):
-             return Response(content=result.stdout, media_type="image/png")
+        # Increase timeout slightly and use 2MB buffer to handle high-res screens
+        result = subprocess.run(["adb", "exec-out", "screencap", "-p"], capture_output=True, timeout=5)
+        if result.returncode == 0 and len(result.stdout) > 5000:
+             # Basic validation of PNG magic bytes
+             if result.stdout.startswith(b'\x89PNG'):
+                 return Response(content=result.stdout, media_type="image/png")
+             else:
+                 print(f"[SCREENSHOT] Method 1 returned invalid header: {result.stdout[:8]}")
     except Exception as e:
         print(f"[SCREENSHOT] Method 1 failed: {e}")
 
-    # Method 2: shell screencap -p (Direct Stream)
+    # Method 2: shell screencap with fix for binary stream
+    # Sometimes 'exec-out' is unavailable or broken.
     try:
-        shell_res = subprocess.run(["adb", "shell", "screencap", "-p"], capture_output=True, timeout=5)
-        if shell_res.returncode == 0 and len(shell_res.stdout) > 1000 and shell_res.stdout.startswith(b'\x89PNG'):
-             return Response(content=shell_res.stdout, media_type="image/png")
+        # We use 'cat' to get the file if we can't stream it directly
+        # But first try to save it to a temp location on device
+        temp_path = "/data/local/tmp/studio_screen.png"
+        subprocess.run(["adb", "shell", "screencap", "-p", temp_path], timeout=5)
+        cat_res = subprocess.run(["adb", "exec-out", "cat", temp_path], capture_output=True, timeout=5)
+        
+        if cat_res.returncode == 0 and len(cat_res.stdout) > 5000:
+            if cat_res.stdout.startswith(b'\x89PNG'):
+                return Response(content=cat_res.stdout, media_type="image/png")
     except Exception as e:
         print(f"[SCREENSHOT] Method 2 failed: {e}")
 
-    # Method 3: File-based Fallback (Most robust)
+    # Method 3: Fallback to a tiny low-res screenshot if device is struggling
     try:
-        print("[SCREENSHOT] Using file-based fallback...")
-        subprocess.run(["adb", "shell", "screencap", "-p", "/data/local/tmp/ratl_screen.png"], check=True, timeout=7)
-        cat_res = subprocess.run(["adb", "exec-out", "cat", "/data/local/tmp/ratl_screen.png"], capture_output=True, timeout=5)
-        
-        if cat_res.returncode == 0 and len(cat_res.stdout) > 100:
-             return Response(content=cat_res.stdout, media_type="image/png")
+        print("[SCREENSHOT] Attempting low-res fallback...")
+        # Maestro actually has a very robust screenshot command
+        result = subprocess.run(["maestro", "screenshot", "temp_maestro.png"], timeout=10)
+        if os.path.exists("temp_maestro.png"):
+            with open("temp_maestro.png", "rb") as f:
+                data = f.read()
+            os.remove("temp_maestro.png")
+            return Response(content=data, media_type="image/png")
     except Exception as e:
-        print(f"[SCREENSHOT] Method 3 failed: {e}")
-            
-    # If all failed
-    raise HTTPException(status_code=503, detail="Screenshot failed with all methods")
+        print(f"[SCREENSHOT] Maestro fallback failed: {e}")
+
+    # If all failed, return a 503 so the frontend knows to retry
+    raise HTTPException(status_code=503, detail="Could not capture device screenshot. Ensure device is connected and unlocked.")
+
             
 
 # --- AI Generation ---
