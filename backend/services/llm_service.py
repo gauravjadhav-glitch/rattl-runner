@@ -2,6 +2,7 @@ import os
 import json
 from openai import OpenAI
 from typing import Dict, Any, Optional
+import time
 
 # Initialize client
 client = None
@@ -34,19 +35,24 @@ def ask_llm(system_prompt: str, user_content: str, model: str = "gpt-4o") -> Opt
     if not client:
         return None
 
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content}
-            ],
-            temperature=0.2
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        print(f"[ERROR] LLM Query Failed: {e}")
-        return None
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                temperature=0.2
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"[ERROR] LLM Query Failed (Attempt {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2) # Wait before retry
+            else:
+                return None
 
 def ask_llm_json(system_prompt: str, user_content: str, model: str = "gpt-4o") -> Optional[Dict[str, Any]]:
     """
